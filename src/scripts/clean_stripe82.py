@@ -7,7 +7,9 @@ import pandas as pd
 from astropy.io import ascii
 
 # Reading the raw data file
-DATA = ascii.read('../../../data/DB_QSO_S82.dat')
+DATA = ascii.read('/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data/DB_QSO_S82.dat') #Be sure to change the path to where you have saved the raw data files
+
+# print(len(DATA.field('col1')))
 
 # Extracting useful columns from the DATA file
 ID = DATA.field('col1')
@@ -27,4 +29,8 @@ X_TRAIN['z'] = Z
 X_TRAIN['BH_mass'] = BH_MASS
 
 # Generate csv file of cleaned Stripe 82 data
-X_TRAIN.to_csv('../../../data/clean_stripe82.csv')
+X_TRAIN.to_csv('/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data/clean_stripe82.csv', index=False) #Be sure to change the path to where you want to save the cleaned data .csv file
+#Originally had index = True on
+
+# print(X_TRAIN.shape)
+# print(len(X_TRAIN['ID']))

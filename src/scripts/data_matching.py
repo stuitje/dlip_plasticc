@@ -11,7 +11,7 @@ from astropy import units as u
 S82 = pd.read_csv('../../data/clean_stripe82.csv')
 
 # Reading SDSS DR7 clean data
-DR7 = pd.read_csv('../../data/clean_dr7.csv')
+DR7 = pd.read_csv('../../data/dr7_BH.csv')
 
 # Rename the ra, dec coordinates from the 2 different data sets
 DR7 = DR7.rename(index=str, columns={'ra': 'ra_DR7', 'dec': 'dec_DR7'})

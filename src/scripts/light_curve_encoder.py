@@ -18,7 +18,8 @@ import numpy as np
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 
-folder = "/media/joshua/Milano/DR7_QSO_LCs_delta_t/"  # path to the dataset 
+# folder = "/media/joshua/Milano/DR7_QSO_LCs_delta_t/"  # path to the dataset
+folder = "/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data/QSO_S82/"  # path to the dataset 
 EPOCH = 100
 glo_batch_size = 10
 test_num_batch = 50
@@ -43,11 +44,13 @@ class BHDataset(Dataset): # torch.utils.data.Dataset
 
         if self.train:
             self.path = os.path.join(self.root_dir, self.train_folder)
-            self.df = pd.read_csv("/media/joshua/Milano/DR7_features_DRW/train" + '/train.csv') # path to csv table for the training set
+            # self.df = pd.read_csv("/media/joshua/Milano/DR7_features_DRW/train" + '/train.csv') # path to csv table for the training set
+            self.df = pd.read_csv("/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data" + '/TRAIN_dr14.csv')
             #self.length = TRAINING_SAMPLES
         else:
             self.path = os.path.join(self.root_dir, self.test_folder)
-            self.df = pd.read_csv("/media/joshua/Milano/DR7_features_DRW/val" + '/val.csv') # path to csv table for the training set
+            # self.df = pd.read_csv("/media/joshua/Milano/DR7_features_DRW/val" + '/val.csv')
+            self.df = pd.read_csv("/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data" + '/TEST_dr14.csv') # path to csv table for the test set
             #self.length = TESTING_SAMPLES
 
     def __getitem__(self, index):
@@ -76,7 +79,8 @@ class BHDataset(Dataset): # torch.utils.data.Dataset
         tau = self.df['tau'].iloc[[index]]
         sigma = self.df['sigma'].iloc[[index]]
 
-        img_path = "/media/joshua/Milano/Efficient_Full_train" + '/LC_images_' + str(ID.values[0]) + '.npy' ## path to the light curve images
+        # img_path = "/media/joshua/Milano/Efficient_Full_train" + '/LC_images_' + str(ID.values[0]) + '.npy' 
+        img_path = "/Users/baseb/Desktop/Uni files/DLiP/DLiP_project/data/numpy_images" + '/LC_images_' + str(ID.values[0]) + '.npy' # path to the light curve images
         img = np.load(img_path)
         image = np.zeros((3, 224, 224))
         for i in range(3):
