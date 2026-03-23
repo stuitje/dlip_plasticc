@@ -1,3 +1,6 @@
+# Avocado settings file for PLAsTiCC. 
+#This file should be copied to the root of the project and edited to specify YOUR settings.
+
 {
     "user_settings_file": "avocado_settings.json",
     "data_directory": "/scratch/s4339150/plasticc/data",
