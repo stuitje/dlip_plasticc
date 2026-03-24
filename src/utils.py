@@ -30,6 +30,50 @@ class FocalLoss(nn.Module):
             loss = loss * self.weight[targets]
         return loss.mean()
 
+
+# ── Redshift-weighted Loss ────────────────────────────────────────────────────
+class RedshiftWeightedLoss(nn.Module):
+    """
+    Weights each object's loss by 1/p(z|class) to correct for the
+    spectroscopic bias in the training set.
+
+    Objects at high redshift are underrepresented in training but
+    common in the test set — upweighting them corrects for this.
+
+    Following Boone (2019): weight = 1 / (count of objects in redshift bin
+    for that class), normalized per class.
+
+    In practice we use a simpler proxy: weight by redshift directly,
+    so high-z objects get more weight. This is a reasonable approximation
+    when the training set is heavily biased toward low-z objects.
+    """
+    def __init__(self, gamma=2.0, class_weight=None, redshift_scale=1.0):
+        super().__init__()
+        self.focal     = FocalLoss(gamma=gamma, weight=class_weight)
+        self.redshift_scale = redshift_scale  # tune this — higher = more z weighting
+
+    def forward(self, logits, targets, redshifts=None):
+        # Per-sample focal loss (unreduced)
+        log_p   = F.log_softmax(logits, dim=1)
+        p       = torch.exp(log_p)
+        log_p_t = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)
+        p_t     = p.gather(1, targets.unsqueeze(1)).squeeze(1)
+        focal_weight = (1 - p_t) ** self.focal.gamma
+        loss = -focal_weight * log_p_t
+
+        if self.focal.weight is not None:
+            loss = loss * self.focal.weight[targets]
+
+        if redshifts is not None:
+            # Upweight high-redshift objects
+            # w(z) = 1 + redshift_scale * z  (linear upweighting)
+            z_weight = 1.0 + self.redshift_scale * redshifts.to(loss.device)
+            z_weight = z_weight / z_weight.mean()  # normalize so mean weight = 1
+            loss = loss * z_weight
+
+        return loss.mean()
+
+
 # ── Time-based Positional Encoding ───────────────────────────────────────────
 class TimePositionalEncoding(nn.Module):
     def __init__(self, d_model=D_MODEL):
@@ -43,6 +87,7 @@ class TimePositionalEncoding(nn.Module):
         sin_enc = torch.sin(t * self.div_term)
         cos_enc = torch.cos(t * self.div_term)
         return torch.cat([sin_enc, cos_enc], dim=-1)
+
 
 # ── Transformer branch ────────────────────────────────────────────────────────
 class LCTransformer(nn.Module):
@@ -59,14 +104,15 @@ class LCTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
     def forward(self, x, mask):
-        times  = x[:, :, 0]
-        x_proj = self.input_proj(x)
-        pe     = self.time_pe(times)
-        x_proj = self.dropout(x_proj + pe)
+        times    = x[:, :, 0]
+        x_proj   = self.input_proj(x)
+        pe       = self.time_pe(times)
+        x_proj   = self.dropout(x_proj + pe)
         pad_mask = (mask == 0)
-        x_proj = self.encoder(x_proj, src_key_padding_mask=pad_mask)
-        mask_expanded = mask.unsqueeze(-1)
-        return (x_proj * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+        x_proj   = self.encoder(x_proj, src_key_padding_mask=pad_mask)
+        mask_exp = mask.unsqueeze(-1)
+        return (x_proj * mask_exp).sum(dim=1) / mask_exp.sum(dim=1).clamp(min=1)
+
 
 # ── Feature MLP branch ────────────────────────────────────────────────────────
 class FeatureMLP(nn.Module):
@@ -84,6 +130,7 @@ class FeatureMLP(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
+
 
 # ── Hybrid model ──────────────────────────────────────────────────────────────
 class HybridPlasticcNet(nn.Module):
@@ -104,6 +151,7 @@ class HybridPlasticcNet(nn.Module):
         feat_emb = self.feature_mlp(features)
         return self.head(torch.cat([lc_emb, feat_emb], dim=1))
 
+
 # ── Keep old PlasticcNet for backwards compat ─────────────────────────────────
 class PlasticcNet(nn.Module):
     def __init__(self, in_dim, n_classes, dropout=DROPOUT):
@@ -123,6 +171,7 @@ class PlasticcNet(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
+
 
 # ── Data loading & preprocessing ─────────────────────────────────────────────
 def load_features():

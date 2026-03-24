@@ -46,7 +46,7 @@ print(f"Loaded: {CHECKPOINT_HYBRID}")
 # ── Evaluate ──────────────────────────────────────────────────────────────────
 all_preds, all_probs, all_labels = [], [], []
 with torch.no_grad():
-    for seq, mask, feats, labels in val_loader:
+    for seq, mask, feats, labels, redshifts in val_loader:
         seq, mask     = seq.to(DEVICE),   mask.to(DEVICE)
         feats, labels = feats.to(DEVICE), labels.to(DEVICE)
         logits = model(seq, mask, feats)

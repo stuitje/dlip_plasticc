@@ -6,9 +6,10 @@ import os
 
 from config import (
     BATCH_SIZE, EPOCHS, LR, WEIGHT_DECAY, EARLY_STOP_PATIENCE,
-    FOCAL_GAMMA, CHECKPOINT_HYBRID, DEVICE
+    FOCAL_GAMMA, CHECKPOINT_HYBRID, DEVICE,
+    USE_REDSHIFT_WEIGHTING, REDSHIFT_SCALE
 )
-from utils import HybridPlasticcNet, FocalLoss, build_dataset, class_weights
+from utils import HybridPlasticcNet, FocalLoss, RedshiftWeightedLoss, build_dataset, class_weights
 from dataset import PlasticcDataset, load_observations
 
 print(f"Using device: {DEVICE}")
@@ -19,7 +20,6 @@ n_classes = len(le.classes_)
 print(f"Classes ({n_classes}): {le.classes_}")
 
 obs_dict, meta_dict = load_observations()
-
 valid_ids = [oid for oid in object_ids if oid in obs_dict]
 valid_idx = [object_ids.index(oid) for oid in valid_ids]
 X_valid   = X[valid_idx]
@@ -55,7 +55,14 @@ print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 cw        = class_weights(y_valid, n_classes, DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-criterion = FocalLoss(gamma=FOCAL_GAMMA, weight=cw)
+
+if USE_REDSHIFT_WEIGHTING:
+    print(f"Using redshift-weighted loss (scale={REDSHIFT_SCALE})")
+    criterion = RedshiftWeightedLoss(gamma=FOCAL_GAMMA, class_weight=cw,
+                                     redshift_scale=REDSHIFT_SCALE)
+else:
+    print("Using focal loss (no redshift weighting)")
+    criterion = FocalLoss(gamma=FOCAL_GAMMA, weight=cw)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 def run_epoch(loader, train=True):
@@ -63,21 +70,28 @@ def run_epoch(loader, train=True):
     total_loss, correct, n = 0, 0, 0
     all_probs, all_labels  = [], []
     with torch.set_grad_enabled(train):
-        for seq, mask, feats, labels in loader:
+        for seq, mask, feats, labels, redshifts in loader:
             seq, mask     = seq.to(DEVICE),   mask.to(DEVICE)
             feats, labels = feats.to(DEVICE), labels.to(DEVICE)
             logits = model(seq, mask, feats)
-            loss   = criterion(logits, labels)
+
+            if USE_REDSHIFT_WEIGHTING and train:
+                loss = criterion(logits, labels, redshifts=redshifts)
+            else:
+                loss = criterion(logits, labels)
+
             if train:
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+
             total_loss += loss.item() * len(labels)
             correct    += (logits.argmax(1) == labels).sum().item()
             n          += len(labels)
             all_probs.append(torch.softmax(logits, dim=1).detach().cpu().numpy())
             all_labels.append(labels.cpu().numpy())
+
     all_probs  = np.vstack(all_probs)
     all_labels = np.concatenate(all_labels)
     logloss    = log_loss(all_labels, all_probs, labels=list(range(n_classes)))
