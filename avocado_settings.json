@@ -8,7 +8,7 @@
     "augment_retries": 10,
 
     "features_directory": "/scratch/s4339150/plasticc/features",
-    "features_tag": "features_v1",
+    "features_tag": "features_v2",
 
     "classifier_directory": "/scratch/s4339150/plasticc/classifiers",
 
