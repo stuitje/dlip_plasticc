@@ -6,20 +6,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
 
-from utils import HybridPlasticcNet, build_dataset, DEVICE
+from config import CHECKPOINT_HYBRID, DEVICE, LOG_DIR
+from utils import HybridPlasticcNet, build_dataset
 from dataset import PlasticcDataset, load_observations
-
-# ── Config ────────────────────────────────────────────────────────────────────
-CHECKPOINT_PATH = "checkpoints/plasticc_hybrid.pt"
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 X, y, le, scaler, object_ids = build_dataset()
 n_classes   = len(le.classes_)
 class_names = [str(c) for c in le.classes_]
 
-obs_dict = load_observations()
-
+obs_dict  = load_observations()
 valid_ids = [oid for oid in object_ids if oid in obs_dict]
 valid_idx = [object_ids.index(oid) for oid in valid_ids]
 X_valid   = X[valid_idx]
@@ -29,25 +27,21 @@ y_valid   = y[valid_idx]
 n_total = len(valid_ids)
 n_val   = int(0.15 * n_total)
 n_train = n_total - n_val
-
-rng      = np.random.default_rng(42)
+rng     = np.random.default_rng(42)
 idx_perm = rng.permutation(n_total)
 val_idx_split = idx_perm[n_train:]
 
-val_ids = [valid_ids[i] for i in val_idx_split]
-val_ds  = PlasticcDataset(
-    val_ids, obs_dict,
-    X_valid[val_idx_split],
-    y_valid[val_idx_split],
-    augment=False
+val_ds = PlasticcDataset(
+    [valid_ids[i] for i in val_idx_split], obs_dict,
+    X_valid[val_idx_split], y_valid[val_idx_split], augment=False
 )
 val_loader = DataLoader(val_ds, batch_size=64, num_workers=0)
 
 # ── Load model ────────────────────────────────────────────────────────────────
 model = HybridPlasticcNet(X.shape[1], n_classes).to(DEVICE)
-model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
+model.load_state_dict(torch.load(CHECKPOINT_HYBRID, map_location=DEVICE))
 model.eval()
-print(f"Loaded checkpoint: {CHECKPOINT_PATH}")
+print(f"Loaded: {CHECKPOINT_HYBRID}")
 
 # ── Evaluate ──────────────────────────────────────────────────────────────────
 all_preds, all_probs, all_labels = [], [], []
@@ -91,8 +85,9 @@ axes[1].set_xlabel("Predicted")
 axes[1].set_ylabel("True")
 
 plt.tight_layout()
-plt.savefig("logs/confusion_matrix_hybrid.png", dpi=150)
-print("\nConfusion matrix saved to logs/confusion_matrix_hybrid.png")
+os.makedirs(LOG_DIR, exist_ok=True)
+plt.savefig(os.path.join(LOG_DIR, "confusion_matrix_hybrid.png"), dpi=150)
+print(f"\nConfusion matrix saved to {LOG_DIR}/confusion_matrix_hybrid.png")
 
 # ── Per-class accuracy ────────────────────────────────────────────────────────
 print("\nPer-class accuracy:")
