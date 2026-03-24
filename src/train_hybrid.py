@@ -18,11 +18,12 @@ X, y, le, scaler, object_ids = build_dataset()
 n_classes = len(le.classes_)
 print(f"Classes ({n_classes}): {le.classes_}")
 
-obs_dict   = load_observations()
-valid_ids  = [oid for oid in object_ids if oid in obs_dict]
-valid_idx  = [object_ids.index(oid) for oid in valid_ids]
-X_valid    = X[valid_idx]
-y_valid    = y[valid_idx]
+obs_dict, meta_dict = load_observations()
+
+valid_ids = [oid for oid in object_ids if oid in obs_dict]
+valid_idx = [object_ids.index(oid) for oid in valid_ids]
+X_valid   = X[valid_idx]
+y_valid   = y[valid_idx]
 print(f"Objects with observations: {len(valid_ids)}")
 
 # ── Train/val split ───────────────────────────────────────────────────────────
@@ -35,11 +36,11 @@ train_idx = idx_perm[:n_train]
 val_idx   = idx_perm[n_train:]
 
 train_ds = PlasticcDataset(
-    [valid_ids[i] for i in train_idx], obs_dict,
+    [valid_ids[i] for i in train_idx], obs_dict, meta_dict,
     X_valid[train_idx], y_valid[train_idx], augment=True
 )
 val_ds = PlasticcDataset(
-    [valid_ids[i] for i in val_idx], obs_dict,
+    [valid_ids[i] for i in val_idx], obs_dict, meta_dict,
     X_valid[val_idx], y_valid[val_idx], augment=False
 )
 

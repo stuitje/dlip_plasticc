@@ -17,7 +17,7 @@ X, y, le, scaler, object_ids = build_dataset()
 n_classes   = len(le.classes_)
 class_names = [str(c) for c in le.classes_]
 
-obs_dict  = load_observations()
+obs_dict, meta_dict = load_observations()
 valid_ids = [oid for oid in object_ids if oid in obs_dict]
 valid_idx = [object_ids.index(oid) for oid in valid_ids]
 X_valid   = X[valid_idx]
@@ -28,11 +28,11 @@ n_total = len(valid_ids)
 n_val   = int(0.15 * n_total)
 n_train = n_total - n_val
 rng     = np.random.default_rng(42)
-idx_perm = rng.permutation(n_total)
+idx_perm      = rng.permutation(n_total)
 val_idx_split = idx_perm[n_train:]
 
 val_ds = PlasticcDataset(
-    [valid_ids[i] for i in val_idx_split], obs_dict,
+    [valid_ids[i] for i in val_idx_split], obs_dict, meta_dict,
     X_valid[val_idx_split], y_valid[val_idx_split], augment=False
 )
 val_loader = DataLoader(val_ds, batch_size=64, num_workers=0)
