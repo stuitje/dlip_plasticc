@@ -26,10 +26,10 @@ BAND_MAP = {
 }
 
 # ── Transformer config ────────────────────────────────────────────────────────
-D_MODEL  = 128
-N_HEADS  = 8
-N_LAYERS = 4
-FFN_DIM  = 256
+D_MODEL  = 64
+N_HEADS  = 4
+N_LAYERS = 2
+FFN_DIM  = 128
 
 # ── Training config ───────────────────────────────────────────────────────────
 BATCH_SIZE           = 64
@@ -42,7 +42,7 @@ FOCAL_GAMMA          = 2.0
 
 # ── Redshift weighting ────────────────────────────────────────────────────────
 USE_REDSHIFT_WEIGHTING = False  # set False to disable
-REDSHIFT_SCALE         = 1.0   # higher = more weight on high-z objects
+REDSHIFT_SCALE         = 0.5   # higher = more weight on high-z objects
                                 # tune between 0.5 and 2.0
 
 # ── Checkpoint names ──────────────────────────────────────────────────────────
