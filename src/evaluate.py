@@ -12,6 +12,23 @@ from config import CHECKPOINT_HYBRID, DEVICE, LOG_DIR
 from utils import HybridPlasticcNet, build_dataset
 from dataset import PlasticcDataset, load_observations
 
+# ── Flat-weighted metric (Boone 2019, Equation 2) ─────────────────────────────
+def flat_weighted_logloss(y_true, y_probs, n_classes):
+    """
+    Each class contributes equally regardless of how many objects it has.
+    Directly comparable to Boone's reported 0.468.
+    """
+    total = 0.0
+    count = 0
+    for i in range(n_classes):
+        mask = y_true == i
+        if mask.sum() == 0:
+            continue
+        p = np.clip(y_probs[mask, i], 1e-15, 1.0)
+        total += -np.mean(np.log(p))
+        count += 1
+    return total / count
+
 # ── Data ──────────────────────────────────────────────────────────────────────
 X, y, le, scaler, object_ids = build_dataset()
 n_classes   = len(le.classes_)
@@ -60,12 +77,29 @@ all_probs  = np.vstack(all_probs)
 all_preds  = np.concatenate(all_preds)
 all_labels = np.concatenate(all_labels)
 
+# ── Metrics ───────────────────────────────────────────────────────────────────
+sklearn_ll   = log_loss(all_labels, all_probs)
+flat_ll      = flat_weighted_logloss(all_labels, all_probs, n_classes)
+accuracy     = (all_preds == all_labels).mean()
+
 print("=" * 60)
-print(f"Val log-loss : {log_loss(all_labels, all_probs):.4f}")
-print(f"Val accuracy : {(all_preds == all_labels).mean():.4f}")
+print(f"Sklearn log-loss (object-weighted) : {sklearn_ll:.4f}")
+print(f"Flat-weighted log-loss (Boone eq2) : {flat_ll:.4f}  ← comparable to 0.468")
+print(f"Val accuracy                        : {accuracy:.4f}")
 print("=" * 60)
 print("\nClassification report:")
 print(classification_report(all_labels, all_preds, target_names=class_names))
+
+# ── Per-class log-loss ────────────────────────────────────────────────────────
+print("Per-class log-loss (lower = better):")
+for i, cls in enumerate(class_names):
+    mask = all_labels == i
+    if mask.sum() == 0:
+        continue
+    p   = np.clip(all_probs[mask, i], 1e-15, 1.0)
+    ll  = -np.mean(np.log(p))
+    acc = (all_preds[mask] == all_labels[mask]).mean()
+    print(f"  Class {cls:>3s}: logloss={ll:.4f}  acc={acc:.3f}  (n={mask.sum()})")
 
 # ── Confusion matrix ──────────────────────────────────────────────────────────
 cm      = confusion_matrix(all_labels, all_preds)
@@ -88,12 +122,3 @@ plt.tight_layout()
 os.makedirs(LOG_DIR, exist_ok=True)
 plt.savefig(os.path.join(LOG_DIR, "confusion_matrix_hybrid.png"), dpi=150)
 print(f"\nConfusion matrix saved to {LOG_DIR}/confusion_matrix_hybrid.png")
-
-# ── Per-class accuracy ────────────────────────────────────────────────────────
-print("\nPer-class accuracy:")
-for i, cls in enumerate(class_names):
-    mask = all_labels == i
-    if mask.sum() == 0:
-        continue
-    acc = (all_preds[mask] == all_labels[mask]).mean()
-    print(f"  Class {cls:>3s}: {acc:.3f}  (n={mask.sum()})")
