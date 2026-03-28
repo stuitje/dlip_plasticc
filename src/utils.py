@@ -9,7 +9,8 @@ import math
 
 from config import (
     FEATURES_PATH, NUM_CHUNKS, NUM_TRAIN_CHUNKS,
-    DROPOUT, SEQ_LEN, D_MODEL, N_HEADS, N_LAYERS, FFN_DIM, DEVICE
+    DROPOUT, SEQ_LEN, D_MODEL, N_HEADS, N_LAYERS, FFN_DIM, DEVICE,
+    DATASET_NAME
 )
 
 # ── Focal Loss ────────────────────────────────────────────────────────────────
@@ -33,44 +34,23 @@ class FocalLoss(nn.Module):
 
 # ── Redshift-weighted Loss ────────────────────────────────────────────────────
 class RedshiftWeightedLoss(nn.Module):
-    """
-    Weights each object's loss by 1/p(z|class) to correct for the
-    spectroscopic bias in the training set.
-
-    Objects at high redshift are underrepresented in training but
-    common in the test set — upweighting them corrects for this.
-
-    Following Boone (2019): weight = 1 / (count of objects in redshift bin
-    for that class), normalized per class.
-
-    In practice we use a simpler proxy: weight by redshift directly,
-    so high-z objects get more weight. This is a reasonable approximation
-    when the training set is heavily biased toward low-z objects.
-    """
     def __init__(self, gamma=2.0, class_weight=None, redshift_scale=1.0):
         super().__init__()
-        self.focal     = FocalLoss(gamma=gamma, weight=class_weight)
-        self.redshift_scale = redshift_scale  # tune this — higher = more z weighting
+        self.focal          = FocalLoss(gamma=gamma, weight=class_weight)
+        self.redshift_scale = redshift_scale
 
     def forward(self, logits, targets, redshifts=None):
-        # Per-sample focal loss (unreduced)
         log_p   = F.log_softmax(logits, dim=1)
         p       = torch.exp(log_p)
         log_p_t = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)
         p_t     = p.gather(1, targets.unsqueeze(1)).squeeze(1)
-        focal_weight = (1 - p_t) ** self.focal.gamma
-        loss = -focal_weight * log_p_t
-
+        loss    = -(1 - p_t) ** self.focal.gamma * log_p_t
         if self.focal.weight is not None:
             loss = loss * self.focal.weight[targets]
-
         if redshifts is not None:
-            # Upweight high-redshift objects
-            # w(z) = 1 + redshift_scale * z  (linear upweighting)
             z_weight = 1.0 + self.redshift_scale * redshifts.to(loss.device)
-            z_weight = z_weight / z_weight.mean()  # normalize so mean weight = 1
+            z_weight = z_weight / z_weight.mean()
             loss = loss * z_weight
-
         return loss.mean()
 
 
@@ -78,15 +58,14 @@ class RedshiftWeightedLoss(nn.Module):
 class TimePositionalEncoding(nn.Module):
     def __init__(self, d_model=D_MODEL):
         super().__init__()
-        self.d_model = d_model
         i = torch.arange(0, d_model // 2, dtype=torch.float32)
-        self.register_buffer("div_term", torch.exp(i * (-math.log(10000.0) / d_model)))
+        self.register_buffer("div_term",
+                             torch.exp(i * (-math.log(10000.0) / d_model)))
 
     def forward(self, times):
-        t       = times.unsqueeze(-1) * 10000.0
-        sin_enc = torch.sin(t * self.div_term)
-        cos_enc = torch.cos(t * self.div_term)
-        return torch.cat([sin_enc, cos_enc], dim=-1)
+        t = times.unsqueeze(-1) * 10000.0
+        return torch.cat([torch.sin(t * self.div_term),
+                          torch.cos(t * self.div_term)], dim=-1)
 
 
 # ── Transformer branch ────────────────────────────────────────────────────────
@@ -178,9 +157,10 @@ def load_features():
     return pd.read_hdf(FEATURES_PATH, key="raw_features")
 
 def load_labels():
+    """Load labels from either plasticc_train or plasticc_augmented."""
     labels = []
     for chunk in range(NUM_TRAIN_CHUNKS):
-        d = avocado.load("plasticc_augmented", chunk=chunk,
+        d = avocado.load(DATASET_NAME, chunk=chunk,
                          num_chunks=NUM_CHUNKS, metadata_only=True)
         labels.append(d.metadata[["class"]])
     return pd.concat(labels)
@@ -202,6 +182,7 @@ def build_dataset():
     print(f"  Raw shape: {df.shape}")
     print("Loading labels...")
     labels = load_labels().loc[df.index]
+    print(f"  Class distribution:\n{labels['class'].value_counts()}")
     print("Preprocessing...")
     df = preprocess(df)
     print(f"  Final shape: {df.shape}")
@@ -210,9 +191,47 @@ def build_dataset():
     scaler = StandardScaler()
     X = scaler.fit_transform(df.values).astype(np.float32)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-    return X, y, le, scaler, df.index.tolist()
+    return X, y, le, scaler, df.index.tolist(), df.columns.tolist()
 
 def class_weights(y, n_classes, device):
-    counts = np.bincount(y)
-    w = torch.tensor(1.0 / counts, dtype=torch.float32).to(device)
+    counts = np.bincount(y, minlength=n_classes)
+    w = torch.tensor(1.0 / np.maximum(counts, 1), dtype=torch.float32).to(device)
     return w / w.sum() * n_classes
+
+# ── Preprocessing helpers using original training set ─────────────────────────
+def build_original_preprocessor():
+    """
+    Build scaler and label encoder from the ORIGINAL training set (plasticc_train).
+    Use this for preprocessing test set features, since the test set has the
+    same feature structure as the original training set, not the augmented one.
+    Returns: X, y, le, scaler, object_ids, columns
+    """
+    import os
+    import pandas as pd
+    import avocado
+    from config import FEATURES_DIR
+
+    orig_features_path = os.path.join(FEATURES_DIR, "features_v2_plasticc_train.h5")
+    print("Loading original training features for preprocessing...")
+    df = pd.read_hdf(orig_features_path, key="raw_features")
+    print(f"  Raw shape: {df.shape}")
+
+    # Load labels
+    labels = []
+    for chunk in range(8):
+        d = avocado.load("plasticc_train", chunk=chunk,
+                         num_chunks=8, metadata_only=True)
+        labels.append(d.metadata[["class"]])
+    labels = pd.concat(labels).loc[df.index]
+
+    # Preprocess
+    df = preprocess(df)
+    print(f"  Preprocessed shape: {df.shape}")
+
+    le     = LabelEncoder()
+    y      = le.fit_transform(labels["class"].values).astype(np.int64)
+    scaler = StandardScaler()
+    X      = scaler.fit_transform(df.values).astype(np.float32)
+    X      = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return X, y, le, scaler, df.index.tolist(), df.columns.tolist()
