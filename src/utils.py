@@ -180,7 +180,7 @@ def load_features():
 def load_labels():
     labels = []
     for chunk in range(NUM_TRAIN_CHUNKS):
-        d = avocado.load("plasticc_train", chunk=chunk,
+        d = avocado.load("plasticc_augmented", chunk=chunk,
                          num_chunks=NUM_CHUNKS, metadata_only=True)
         labels.append(d.metadata[["class"]])
     return pd.concat(labels)

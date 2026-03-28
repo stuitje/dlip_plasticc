@@ -1,61 +1,37 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from astropy.cosmology import FlatLambdaCDM
-import avocado
 import pickle
 import os
 
-from config import BAND_MAP, SEQ_LEN, NUM_CHUNKS, NUM_TRAIN_CHUNKS, SCRATCH_DIR
+from config import (BAND_MAP, SEQ_LEN, SCRATCH_DIR,
+                    OBS_DATASET_NAME, OBS_NUM_CHUNKS, OBS_TOTAL_CHUNKS)
 
-# ── Cosmology ─────────────────────────────────────────────────────────────────
-COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
-_Z_GRID       = np.linspace(0.001, 4.0, 2000)
-_DISTMOD_GRID = np.array(COSMO.distmod(_Z_GRID).value, dtype=np.float32)
+# ── Cached augmented sequences ────────────────────────────────────────────────
+AUG_SEQUENCES_PATH = os.path.join(SCRATCH_DIR, "augmented_sequences.pkl")
+_aug_seq_cache = None
 
-def redshift_to_distmod(z):
-    return float(np.interp(z, _Z_GRID, _DISTMOD_GRID))
+def get_aug_sequences():
+    """Load precomputed augmented sequences cache (from transformer.py)."""
+    global _aug_seq_cache
+    if _aug_seq_cache is None:
+        print(f"Loading augmented sequences cache: {AUG_SEQUENCES_PATH}")
+        with open(AUG_SEQUENCES_PATH, "rb") as f:
+            data = pickle.load(f)
+        # Build {object_id: (seq, mask)} lookup
+        _aug_seq_cache = {
+            oid: (data["sequences"][i], data["masks"][i])
+            for i, oid in enumerate(data["object_ids"])
+        }
+        print(f"  Loaded sequences for {len(_aug_seq_cache):,} objects")
+    return _aug_seq_cache
 
-Z_TRAIN_MEAN = 0.369
-Z_TRAIN_STD  = 0.341
-Z_TRAIN_MIN  = 0.011
-Z_TRAIN_MAX  = 3.443
+def get_original_id(oid):
+    """Strip augmentation suffix to get original object ID."""
+    return oid.split("_aug_")[0] if "_aug_" in oid else oid
 
-def sample_redshift():
-    while True:
-        z = np.random.normal(Z_TRAIN_MEAN, Z_TRAIN_STD)
-        if Z_TRAIN_MIN <= z <= Z_TRAIN_MAX:
-            return float(z)
-
-# ── Augmentation ──────────────────────────────────────────────────────────────
-def augment_observations(obs, metadata):
-    obs = obs.copy()
-    is_galactic  = metadata.get("galactic", False)
-    z_orig       = metadata.get("redshift", 0.0)
-    distmod_orig = metadata.get("true_distmod", 0.0)
-
-    if is_galactic or z_orig <= 0:
-        scale = np.random.uniform(0.8, 1.2)
-        obs["flux"]       = obs["flux"] * scale
-        obs["flux_error"] = obs["flux_error"] * scale
-    else:
-        z_new         = sample_redshift()
-        distmod_new   = redshift_to_distmod(z_new)
-        flux_scale    = 10 ** ((distmod_orig - distmod_new) / 2.5)
-        obs["flux"]       = obs["flux"] * flux_scale
-        obs["flux_error"] = obs["flux_error"] * flux_scale
-        obs["time"]       = obs["time"] * (1 + z_new) / (1 + z_orig)
-
-    noise = np.random.normal(0, np.abs(obs["flux_error"].values) * 0.1)
-    obs["flux"] = obs["flux"] + noise
-    keep = np.random.rand(len(obs)) > 0.2
-    if keep.sum() > 10:
-        obs = obs[keep]
-    return obs
-
+# ── Simple sequence conversion (for original objects / test set) ──────────────
 def obs_to_sequence(obs, augment=False, metadata=None):
-    if augment and metadata is not None:
-        obs = augment_observations(obs, metadata)
     obs    = obs.sort_values("time")
     t      = obs["time"].values.astype(np.float32)
     t_norm = (t - t.min()) / (t.max() - t.min() + 1e-8)
@@ -76,29 +52,51 @@ def obs_to_sequence(obs, augment=False, metadata=None):
 
 class PlasticcDataset(Dataset):
     """
-    Returns: seq, mask, features, label, redshift
-    redshift is used by RedshiftWeightedLoss during training.
-    Galactic objects have redshift=0.
+    Dataset that uses precomputed augmented sequences for the transformer branch.
+    - If object_id is in aug_seq_cache: uses the actual GP-resampled sequence
+    - Otherwise: falls back to original observations
     """
     def __init__(self, object_ids, observations_dict, metadata_dict,
-                 features, labels, augment=False):
+                 features, labels, augment=False, use_aug_sequences=True):
         self.object_ids        = object_ids
         self.observations_dict = observations_dict
         self.metadata_dict     = metadata_dict
         self.features          = features
         self.labels            = labels
         self.augment           = augment
+        self.use_aug_sequences = use_aug_sequences
+        if use_aug_sequences:
+            self.aug_seqs = get_aug_sequences()
+        else:
+            self.aug_seqs = {}
 
     def __len__(self):
         return len(self.object_ids)
 
     def __getitem__(self, idx):
         oid      = self.object_ids[idx]
-        obs      = self.observations_dict[oid]
-        metadata = self.metadata_dict[oid]
-        seq, mask = obs_to_sequence(obs, augment=self.augment,
-                                    metadata=metadata if self.augment else None)
-        redshift = float(metadata.get("redshift", 0.0))
+        orig_oid = get_original_id(oid)
+        redshift = 0.0
+
+        # ── Transformer sequence ──────────────────────────────────────────────
+        if oid in self.aug_seqs:
+            # Use actual GP-resampled augmented sequence
+            seq, mask = self.aug_seqs[oid]
+        elif orig_oid in self.observations_dict:
+            # Fall back to original observations
+            obs      = self.observations_dict[orig_oid]
+            metadata = self.metadata_dict[orig_oid]
+            seq, mask = obs_to_sequence(obs)
+            redshift  = float(metadata.get("redshift", 0.0))
+        else:
+            # Zero sequence as last resort
+            seq  = np.zeros((SEQ_LEN, 5), dtype=np.float32)
+            mask = np.zeros(SEQ_LEN,      dtype=np.float32)
+
+        # Get redshift from metadata if available
+        if orig_oid in self.metadata_dict:
+            redshift = float(self.metadata_dict[orig_oid].get("redshift", 0.0))
+
         return (
             torch.tensor(seq,                dtype=torch.float32),
             torch.tensor(mask,               dtype=torch.float32),
@@ -108,8 +106,15 @@ class PlasticcDataset(Dataset):
         )
 
 
-def load_observations(num_chunks=NUM_TRAIN_CHUNKS, total_chunks=NUM_CHUNKS):
-    cache_path = os.path.join(SCRATCH_DIR, f"obs_cache_{num_chunks}of{total_chunks}.pkl")
+def load_observations(num_chunks=OBS_NUM_CHUNKS, total_chunks=OBS_TOTAL_CHUNKS):
+    """
+    Load original training observations for fallback.
+    Augmented sequences are loaded separately via get_aug_sequences().
+    """
+    import avocado
+    cache_path = os.path.join(SCRATCH_DIR,
+                               f"obs_cache_{num_chunks}of{total_chunks}.pkl")
+
     if os.path.exists(cache_path):
         print(f"Loading observations from cache: {cache_path}")
         with open(cache_path, "rb") as f:
@@ -117,10 +122,11 @@ def load_observations(num_chunks=NUM_TRAIN_CHUNKS, total_chunks=NUM_CHUNKS):
         print(f"  Loaded {len(obs_dict)} objects from cache")
         return obs_dict, meta_dict
 
-    print("Loading raw observations (first time — will cache)...")
+    print(f"Loading raw observations from {OBS_DATASET_NAME}...")
     obs_dict, meta_dict = {}, {}
     for chunk in range(num_chunks):
-        d = avocado.load("plasticc_train", chunk=chunk, num_chunks=total_chunks)
+        d = avocado.load(OBS_DATASET_NAME, chunk=chunk,
+                         num_chunks=total_chunks)
         for obj in d.objects:
             oid = obj.metadata["object_id"]
             obs_dict[oid]  = obj.observations
