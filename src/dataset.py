@@ -79,11 +79,18 @@ class PlasticcDataset(Dataset):
         redshift = 0.0
 
         # ── Transformer sequence ──────────────────────────────────────────────
-        if oid in self.aug_seqs:
-            # Use actual GP-resampled augmented sequence
+        if self.augment and orig_oid in self.observations_dict:
+            # On-the-fly redshift augmentation — new random redshift every epoch
+            # gives transformer branch infinite variety beyond fixed aug_seqs
+            obs      = self.observations_dict[orig_oid]
+            metadata = self.metadata_dict[orig_oid]
+            seq, mask = obs_to_sequence(obs, augment=True, metadata=metadata)
+            redshift  = float(metadata.get("redshift", 0.0))
+        elif oid in self.aug_seqs:
+            # Use pre-generated GP-resampled augmented sequence
             seq, mask = self.aug_seqs[oid]
         elif orig_oid in self.observations_dict:
-            # Fall back to original observations
+            # Fall back to original observations (no augmentation)
             obs      = self.observations_dict[orig_oid]
             metadata = self.metadata_dict[orig_oid]
             seq, mask = obs_to_sequence(obs)

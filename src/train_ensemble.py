@@ -21,7 +21,7 @@ print(f"Using device: {DEVICE}")
 print(f"Training ensemble of {N_MODELS} models")
 
 # ── Data (load once, reuse for all models) ────────────────────────────────────
-X, y, le, scaler, object_ids = build_dataset()
+X, y, le, scaler, object_ids, cols = build_dataset()
 n_classes = len(le.classes_)
 print(f"Classes ({n_classes}): {le.classes_}")
 

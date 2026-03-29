@@ -14,7 +14,7 @@ import os
 from config import (
     BATCH_SIZE, EPOCHS, LR, WEIGHT_DECAY, EARLY_STOP_PATIENCE,
     FOCAL_GAMMA, CHECKPOINT_HYBRID, DEVICE,
-    USE_REDSHIFT_WEIGHTING, REDSHIFT_SCALE, CHECKPOINT_DIR
+    USE_REDSHIFT_WEIGHTING, REDSHIFT_SCALE, CHECKPOINT_DIR, AUGMENT_ONLINE
 )
 from utils import HybridPlasticcNet, FocalLoss, RedshiftWeightedLoss, build_dataset, class_weights
 from dataset import PlasticcDataset, load_observations, get_aug_sequences, get_original_id
@@ -35,7 +35,7 @@ def flat_weighted_logloss(y_true, y_probs, n_classes):
 print(f"Using device: {DEVICE}")
 print(f"Redshift weighting: {USE_REDSHIFT_WEIGHTING}")
 
-X, y, le, scaler, object_ids = build_dataset()
+X, y, le, scaler, object_ids, cols = build_dataset()
 n_classes   = len(le.classes_)
 class_names = [str(c) for c in le.classes_]
 print(f"Classes ({n_classes}): {le.classes_}")
@@ -71,7 +71,7 @@ def train_model(train_idx, val_idx, fold=None):
     train_ds = PlasticcDataset(
         [valid_ids[i] for i in train_idx], obs_dict, meta_dict,
         X_valid[train_idx], y_valid[train_idx],
-        augment=False, use_aug_sequences=True
+        augment=AUGMENT_ONLINE, use_aug_sequences=True
     )
     val_ds = PlasticcDataset(
         [valid_ids[i] for i in val_idx], obs_dict, meta_dict,

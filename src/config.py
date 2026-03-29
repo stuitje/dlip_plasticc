@@ -42,7 +42,7 @@ EPOCHS               = 200
 LR                   = 5e-4
 WEIGHT_DECAY         = 1e-4
 DROPOUT              = 0.4
-EARLY_STOP_PATIENCE  = 20
+EARLY_STOP_PATIENCE  = 50
 FOCAL_GAMMA          = 2.0
 
 # ── Redshift weighting ────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ USE_REDSHIFT_WEIGHTING = True
 REDSHIFT_SCALE         = 2.0
 
 # ── Online augmentation ───────────────────────────────────────────────────────
-AUGMENT_ONLINE = False
+AUGMENT_ONLINE = True   # on-the-fly redshift augmentation for transformer branch
 
 # ── Checkpoints ───────────────────────────────────────────────────────────────
 CHECKPOINT_HYBRID   = os.path.join(CHECKPOINT_DIR, "plasticc_hybrid_augmented.pt")

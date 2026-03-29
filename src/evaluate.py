@@ -30,7 +30,7 @@ def flat_weighted_logloss(y_true, y_probs, n_classes):
     return total / count
 
 # ── Data ──────────────────────────────────────────────────────────────────────
-X, y, le, scaler, object_ids = build_dataset()
+X, y, le, scaler, object_ids, cols = build_dataset()
 n_classes   = len(le.classes_)
 class_names = [str(c) for c in le.classes_]
 
