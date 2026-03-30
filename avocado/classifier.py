@@ -637,7 +637,7 @@ def weighted_multi_logloss(
                 "or set the weight for that class to 0." % class_name
             )
 
-        class_predictions = predictions[class_name][class_mask]
+        class_predictions = predictions[class_name][class_mask].values
 
         class_loglosses = (
             -class_weight

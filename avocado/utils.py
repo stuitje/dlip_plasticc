@@ -96,7 +96,7 @@ def read_dataframes(
     chunk=None,
     num_chunks=None,
     chunk_column="object_id",
-    verify_input_chunks=True,
+    verify_input_chunks=False,
 ):
     """Read a set of pandas DataFrames from an HDF5 file
 

@@ -1,19 +1,13 @@
 {
     "user_settings_file": "avocado_settings.json",
-    "data_directory": "./data",
-
+    "data_directory": "/scratch/s4642260/plasticc/data",
     "num_folds": 5,
     "fold_random_state": 1,
-
     "augment_retries": 10,
-
-    "features_directory": "./features",
+    "features_directory": "/scratch/s4642260/plasticc/features",
     "features_tag": "features_v1",
-
-    "classifier_directory": "./classifiers",
-
-    "predictions_directory": "./predictions",
-
+    "classifier_directory": "/scratch/s4642260/plasticc/classifiers",
+    "predictions_directory": "/scratch/s4642260/plasticc/predictions",
     "redshift_weighting_group_key": "ddf",
     "redshift_weighting_min_redshift": 0.1,
     "redshift_weighting_max_redshift": 3.0,
