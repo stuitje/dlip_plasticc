@@ -30,41 +30,90 @@ except Exception as exc:
     nn = _NNFallback()
 
 
-class _PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=512):
+class _TimePositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding driven by actual observation timestamps.
+
+    Unlike index-based positional encoding, this uses the real (normalised)
+    time value of each observation so the model understands irregular cadence:
+    a 1-day gap and a 30-day gap produce very different encodings.
+
+    Channel 0 of cont_x is expected to hold the normalised time value.
+    """
+
+    def __init__(self, d_model):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float32)
-            * (-np.log(10000.0) / d_model)
+        half_dim = d_model // 2
+        i = torch.arange(0, half_dim, dtype=torch.float32)
+        self.register_buffer(
+            "div_term",
+            torch.exp(i * (-np.log(10000.0) / d_model)),
         )
+        self.d_model = d_model
 
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+    def forward(self, times):
+        # times: (B, T)  -- normalised observation timestamps in [0, 1]
+        t = times.unsqueeze(-1) * 10000.0        # scale up for sine resolution
+        pe = torch.cat(
+            [torch.sin(t * self.div_term),
+             torch.cos(t * self.div_term)],
+            dim=-1,
+        )
+        # Handle odd d_model: pad by one zero column
+        if pe.shape[-1] < self.d_model:
+            pad = torch.zeros(
+                pe.shape[0], pe.shape[1], self.d_model - pe.shape[-1],
+                device=pe.device, dtype=pe.dtype,
+            )
+            pe = torch.cat([pe, pad], dim=-1)
+        return pe
 
-        self.register_buffer("pe", pe.unsqueeze(0))
 
-    def forward(self, x):
-        return x + self.pe[:, : x.size(1)]
+class _AttentionPool(nn.Module):
+    """Masked attention pooling over the sequence dimension."""
+
+    def __init__(self, d_model):
+        super().__init__()
+        self.score = nn.Linear(d_model, 1)
+
+    def forward(self, x, mask):
+        # x: (B, T, D), mask: (B, T)
+        scores = self.score(x).squeeze(-1)  # (B, T)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+
+        weights = torch.softmax(scores, dim=1)
+        pooled = torch.sum(x * weights.unsqueeze(-1), dim=1)
+        return pooled
 
 
 class _TransformerNet(nn.Module):
     def __init__(
         self,
-        input_dim,
+        cont_dim,
         num_classes,
+        num_bands=6,
+        global_dim=5,
         d_model=128,
+        band_emb_dim=16,
         nhead=4,
         num_layers=3,
         dim_feedforward=256,
         dropout=0.2,
-        max_len=512,
     ):
         super().__init__()
 
-        self.input_proj = nn.Linear(input_dim, d_model)
-        self.pos_enc = _PositionalEncoding(d_model, max_len=max_len)
+        if band_emb_dim >= d_model:
+            raise ValueError("band_emb_dim must be smaller than d_model.")
+
+        cont_proj_dim = d_model - band_emb_dim
+
+        self.cont_norm = nn.LayerNorm(cont_dim)
+        self.cont_proj = nn.Linear(cont_dim, cont_proj_dim)
+        self.band_emb = nn.Embedding(num_bands, band_emb_dim)
+
+        self.input_norm = nn.LayerNorm(d_model)
+        self.time_pe = _TimePositionalEncoding(d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -76,17 +125,41 @@ class _TransformerNet(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        self.pool = _AttentionPool(d_model)
+
+        self.global_mlp = nn.Sequential(
+            nn.LayerNorm(global_dim),
+            nn.Linear(global_dim, 64),
+            nn.GELU(),
+        )
+
         self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, 128),
+            nn.LayerNorm(d_model + 64),
+            nn.Linear(d_model + 64, 128),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(128, num_classes),
         )
 
-    def forward(self, x, mask=None):
-        x = self.input_proj(x)
-        x = self.pos_enc(x)
+    def forward(self, cont_x, band_ids, mask=None, global_feats=None):
+        # cont_x:   (B, T, C_cont)  -- channel 0 is normalised time
+        # band_ids: (B, T)
+        # mask:     (B, T)
+        # global:   (B, C_global)
+
+        # Extract timestamps before normalising cont_x, so PE uses raw [0,1] values
+        times = cont_x[:, :, 0]   # (B, T)
+
+        cont_x = self.cont_norm(cont_x)
+        x_cont = self.cont_proj(cont_x)
+
+        # Clamp to valid embedding range just in case
+        band_ids = torch.clamp(band_ids, min=0, max=self.band_emb.num_embeddings - 1)
+        x_band = self.band_emb(band_ids)
+
+        x = torch.cat([x_cont, x_band], dim=-1)
+        x = self.input_norm(x)
+        x = x + self.time_pe(times)   # add time-based positional encoding
 
         pad_mask = None
         if mask is not None:
@@ -95,22 +168,44 @@ class _TransformerNet(nn.Module):
 
         x = self.encoder(x, src_key_padding_mask=pad_mask)
 
-        if mask is not None:
-            mask_f = mask.unsqueeze(-1).float()
-            x = (x * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
-        else:
-            x = x.mean(dim=1)
+        pooled = self.pool(x, mask)
 
-        return self.head(x)
+        if global_feats is None:
+            raise ValueError("global_feats must be provided.")
+
+        global_repr = self.global_mlp(global_feats)
+        fused = torch.cat([pooled, global_repr], dim=-1)
+
+        return self.head(fused)
 
 
 class TransformerClassifier(Classifier):
     """Transformer-based classifier using PyTorch.
 
-    Expects dataset.select_features(featurizer) to return either:
-      - features with shape (n_samples, seq_len, channels), or
-      - (features, mask), where mask has shape (n_samples, seq_len)
-        and uses 1 for valid timesteps and 0 for padding.
+    Supported featurizer outputs
+    ----------------------------
+    1. Legacy form:
+       - (features, mask)
+         where features has shape (n_samples, seq_len, channels)
+         and mask has shape (n_samples, seq_len).
+
+       For the current sequence featurizer, features are expected to contain:
+         [time, flux, flux_error, detected, band_id]
+
+       This classifier will automatically derive:
+         - log_dt from time
+         - snr from flux / flux_error
+         - band embedding from band_id
+
+    2. Richer form:
+       - (cont_features, band_ids, mask)
+       - (cont_features, band_ids, mask, global_features)
+
+    Notes
+    -----
+    - Uses band embeddings rather than scalar band IDs.
+    - Uses attention pooling instead of plain masked mean.
+    - Derives lightweight global summary features if they are not provided.
     """
 
     def __init__(
@@ -121,12 +216,15 @@ class TransformerClassifier(Classifier):
         batch_size=64,
         lr=1e-4,
         class_weights=None,
+        auto_class_weights=False,
         device=None,
         d_model=128,
+        band_emb_dim=16,
         nhead=4,
         num_layers=3,
         dim_feedforward=256,
         dropout=0.2,
+        num_bands=6,
     ):
         super().__init__(name)
 
@@ -135,13 +233,16 @@ class TransformerClassifier(Classifier):
         self.batch_size = batch_size
         self.lr = lr
         self.class_weights = class_weights
+        self.auto_class_weights = auto_class_weights
         self.device = device
 
         self.d_model = d_model
+        self.band_emb_dim = band_emb_dim
         self.nhead = nhead
         self.num_layers = num_layers
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
+        self.num_bands = num_bands
 
         self.model = None
         self.class_names = None
@@ -155,34 +256,211 @@ class TransformerClassifier(Classifier):
                 "PyTorch is required for TransformerClassifier but is not installed."
             ) from _TORCH_IMPORT_ERROR
 
+    def _build_class_weight_tensor(self, class_names, class_indices_train, device):
+        """Return a 1-D weight tensor aligned to *class_names* order, or None.
+
+        Rules
+        -----
+        - ``auto_class_weights=True``: inverse-frequency weights computed from
+          the training split, normalised so the mean weight = 1.
+        - ``class_weights`` dict: per-class multipliers; missing classes default
+          to 1.0.
+        - Both can be combined — the dict is applied on top of auto weights
+          (multiplicative).
+        - If neither is set, returns None (uniform weighting).
+        """
+        if not self.auto_class_weights and self.class_weights is None:
+            return None
+
+        weights = np.ones(len(class_names), dtype=np.float32)
+
+        if self.auto_class_weights:
+            counts = np.bincount(
+                class_indices_train, minlength=len(class_names)
+            ).astype(np.float32)
+            counts = np.where(counts == 0, 1.0, counts)   # avoid div-by-zero
+            inv_freq = 1.0 / counts
+            inv_freq /= inv_freq.mean()                    # normalise: mean = 1
+            weights *= inv_freq
+
+        if self.class_weights is not None:
+            for i, c in enumerate(class_names):
+                weights[i] *= self.class_weights.get(c, 1.0)
+
+        return torch.tensor(weights, dtype=torch.float32).to(device)
+
+    def _derive_global_features(self, cont_features, mask):
+        """Derive lightweight per-object global summary features.
+
+        Output shape: (n_samples, 5)
+        """
+        valid = mask.astype(np.float32)
+        denom = np.clip(valid.sum(axis=1), 1.0, None)
+
+        # cont_features convention here:
+        # [time, log_dt, flux, flux_err, snr, detected, ...]
+        flux = cont_features[:, :, 2]
+        flux_err = cont_features[:, :, 3]
+        snr = cont_features[:, :, 4]
+        detected = cont_features[:, :, 5]
+
+        valid_frac = valid.mean(axis=1)
+        mean_abs_flux = (np.abs(flux) * valid).sum(axis=1) / denom
+        mean_flux_err = (np.abs(flux_err) * valid).sum(axis=1) / denom
+        mean_detected = (detected * valid).sum(axis=1) / denom
+
+        masked_abs_snr = np.where(valid > 0, np.abs(snr), -np.inf)
+        max_abs_snr = masked_abs_snr.max(axis=1)
+        max_abs_snr[~np.isfinite(max_abs_snr)] = 0.0
+
+        global_feats = np.stack(
+            [
+                valid_frac,
+                mean_abs_flux,
+                mean_flux_err,
+                max_abs_snr,
+                mean_detected,
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        return global_feats
+
     def _parse_features(self, dataset):
         features = dataset.select_features(self.featurizer)
 
+        cont_features = None
+        band_ids = None
         mask = None
-        if isinstance(features, (tuple, list)) and len(features) == 2:
-            features, mask = features
+        global_feats = None
 
-        if hasattr(features, "values"):
-            features = features.values
-        features = np.asarray(features, dtype=float)
+        # Richer forms
+        if isinstance(features, (tuple, list)):
+            if len(features) == 4:
+                cont_features, band_ids, mask, global_feats = features
+            elif len(features) == 3:
+                cont_features, band_ids, mask = features
+            elif len(features) == 2:
+                # Legacy form: (features, mask)
+                features, mask = features
+            else:
+                raise AvocadoException(
+                    "Unsupported feature tuple format for TransformerClassifier."
+                )
 
-        if np.isnan(features).any() or np.isinf(features).any():
-            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        # Legacy direct 3D array form
+        if cont_features is None and band_ids is None:
+            if hasattr(features, "values"):
+                features = features.values
+            features = np.asarray(features, dtype=float)
 
-        if features.ndim != 3:
-            raise AvocadoException(
-                "TransformerClassifier expects features shaped (n, seq_len, channels), "
-                "or (features, mask)."
-            )
+            if np.isnan(features).any() or np.isinf(features).any():
+                features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
-        if mask is None:
-            mask = np.ones(features.shape[:2], dtype=np.float32)
+            if features.ndim != 3:
+                raise AvocadoException(
+                    "TransformerClassifier expects features shaped "
+                    "(n, seq_len, channels), (features, mask), "
+                    "(cont_features, band_ids, mask), or "
+                    "(cont_features, band_ids, mask, global_features)."
+                )
+
+            if features.shape[2] < 5:
+                raise AvocadoException(
+                    "Legacy sequence features must have at least 5 channels: "
+                    "[time, flux, flux_error, detected, band_id]."
+                )
+
+            if mask is None:
+                mask = np.ones(features.shape[:2], dtype=np.float32)
+            else:
+                if hasattr(mask, "values"):
+                    mask = mask.values
+                mask = np.asarray(mask, dtype=np.float32)
+
+            # Legacy convention:
+            # first channels are continuous, final channel is band_id
+            time_chan = features[:, :, 0].astype(np.float32)
+            flux_chan = features[:, :, 1].astype(np.float32)
+            flux_err_chan = features[:, :, 2].astype(np.float32)
+            detected_chan = features[:, :, 3].astype(np.float32)
+            band_ids = np.rint(features[:, :, -1]).astype(np.int64)
+
+            # Derive log delta-time from normalized time
+            dt = np.diff(time_chan, axis=1, prepend=time_chan[:, :1])
+            dt = np.clip(dt, 0.0, None)
+            log_dt = np.log1p(dt).astype(np.float32)
+
+            # Derive clipped S/N
+            snr = flux_chan / (np.abs(flux_err_chan) + 1e-8)
+            snr = np.clip(snr, -20.0, 20.0).astype(np.float32)
+
+            # Include any extra continuous channels between detected and band_id
+            extra_cont = None
+            if features.shape[2] > 5:
+                extra_cont = features[:, :, 4:-1].astype(np.float32)
+
+            base_cont = [
+                time_chan[:, :, None],
+                log_dt[:, :, None],
+                flux_chan[:, :, None],
+                flux_err_chan[:, :, None],
+                snr[:, :, None],
+                detected_chan[:, :, None],
+            ]
+
+            if extra_cont is not None and extra_cont.shape[2] > 0:
+                base_cont.append(extra_cont)
+
+            cont_features = np.concatenate(base_cont, axis=2).astype(np.float32)
+
         else:
+            # Richer form sanitization
+            if hasattr(cont_features, "values"):
+                cont_features = cont_features.values
+            if hasattr(band_ids, "values"):
+                band_ids = band_ids.values
             if hasattr(mask, "values"):
                 mask = mask.values
+            if global_feats is not None and hasattr(global_feats, "values"):
+                global_feats = global_feats.values
+
+            cont_features = np.asarray(cont_features, dtype=float)
+            band_ids = np.asarray(band_ids, dtype=np.int64)
             mask = np.asarray(mask, dtype=np.float32)
 
-        return features.astype(np.float32), mask.astype(np.float32)
+            if np.isnan(cont_features).any() or np.isinf(cont_features).any():
+                cont_features = np.nan_to_num(
+                    cont_features, nan=0.0, posinf=0.0, neginf=0.0
+                )
+
+            if cont_features.ndim != 3:
+                raise AvocadoException(
+                    "cont_features must have shape (n, seq_len, channels)."
+                )
+            if band_ids.ndim != 2:
+                raise AvocadoException("band_ids must have shape (n, seq_len).")
+            if mask.ndim != 2:
+                raise AvocadoException("mask must have shape (n, seq_len).")
+
+            cont_features = cont_features.astype(np.float32)
+
+        if global_feats is None:
+            global_feats = self._derive_global_features(cont_features, mask)
+        else:
+            global_feats = np.asarray(global_feats, dtype=float)
+            if np.isnan(global_feats).any() or np.isinf(global_feats).any():
+                global_feats = np.nan_to_num(
+                    global_feats, nan=0.0, posinf=0.0, neginf=0.0
+                )
+            global_feats = global_feats.astype(np.float32)
+
+        return (
+            cont_features.astype(np.float32),
+            band_ids.astype(np.int64),
+            mask.astype(np.float32),
+            global_feats.astype(np.float32),
+        )
 
     def train(
         self,
@@ -214,7 +492,7 @@ class TransformerClassifier(Classifier):
         if num_folds < 2:
             raise AvocadoException("TransformerClassifier requires num_folds >= 2.")
 
-        features, mask = self._parse_features(dataset)
+        cont_features, band_ids, mask, global_feats = self._parse_features(dataset)
 
         object_classes = dataset.metadata["class"].values
         class_names = np.unique(object_classes)
@@ -230,39 +508,45 @@ class TransformerClassifier(Classifier):
         if np.sum(train_mask) == 0:
             raise AvocadoException("Training split is empty.")
 
-        X_train = torch.tensor(features[train_mask], dtype=torch.float32)
+        Xc_train = torch.tensor(cont_features[train_mask], dtype=torch.float32)
+        Xb_train = torch.tensor(band_ids[train_mask], dtype=torch.long)
         M_train = torch.tensor(mask[train_mask], dtype=torch.float32)
+        G_train = torch.tensor(global_feats[train_mask], dtype=torch.float32)
         y_train = torch.tensor(class_indices[train_mask], dtype=torch.long)
 
-        X_val = torch.tensor(features[val_mask], dtype=torch.float32)
+        Xc_val = torch.tensor(cont_features[val_mask], dtype=torch.float32)
+        Xb_val = torch.tensor(band_ids[val_mask], dtype=torch.long)
         M_val = torch.tensor(mask[val_mask], dtype=torch.float32)
+        G_val = torch.tensor(global_feats[val_mask], dtype=torch.float32)
         y_val = torch.tensor(class_indices[val_mask], dtype=torch.long)
 
-        train_ds = TensorDataset(X_train, M_train, y_train)
-        val_ds = TensorDataset(X_val, M_val, y_val)
+        train_ds = TensorDataset(Xc_train, Xb_train, M_train, G_train, y_train)
+        val_ds = TensorDataset(Xc_val, Xb_val, M_val, G_val, y_val)
 
         train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
 
         device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
+        num_bands_used = max(self.num_bands, int(np.max(band_ids)) + 1)
+
         model = _TransformerNet(
-            input_dim=features.shape[2],
+            cont_dim=cont_features.shape[2],
             num_classes=len(class_names),
+            num_bands=num_bands_used,
+            global_dim=global_feats.shape[1],
             d_model=self.d_model,
+            band_emb_dim=self.band_emb_dim,
             nhead=self.nhead,
             num_layers=self.num_layers,
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
-            max_len=features.shape[1],
         ).to(device)
 
-        if self.class_weights is not None:
-            weight_list = [self.class_weights.get(c, 1.0) for c in class_names]
-            weight = torch.tensor(weight_list, dtype=torch.float32).to(device)
-            loss_fn = nn.CrossEntropyLoss(weight=weight)
-        else:
-            loss_fn = nn.CrossEntropyLoss()
+        weight_tensor = self._build_class_weight_tensor(
+            class_names, class_indices[train_mask], device
+        )
+        loss_fn = nn.CrossEntropyLoss(weight=weight_tensor)
 
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -293,12 +577,14 @@ class TransformerClassifier(Classifier):
             model.train()
             train_loss = 0.0
 
-            for xb, mb, yb in train_loader:
+            for xc, xb, mb, gb, yb in train_loader:
+                xc = xc.to(device)
                 xb = xb.to(device)
                 mb = mb.to(device)
+                gb = gb.to(device)
                 yb = yb.to(device)
 
-                logits = model(xb, mb)
+                logits = model(xc, xb, mb, gb)
                 loss = loss_fn(logits, yb)
 
                 optimizer.zero_grad()
@@ -306,7 +592,7 @@ class TransformerClassifier(Classifier):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
 
-                train_loss += loss.item() * xb.size(0)
+                train_loss += loss.item() * xc.size(0)
 
             train_loss /= len(train_ds)
 
@@ -317,14 +603,16 @@ class TransformerClassifier(Classifier):
             total = 0
 
             with torch.no_grad():
-                for xb, mb, yb in val_loader:
+                for xc, xb, mb, gb, yb in val_loader:
+                    xc = xc.to(device)
                     xb = xb.to(device)
                     mb = mb.to(device)
+                    gb = gb.to(device)
                     yb = yb.to(device)
 
-                    logits = model(xb, mb)
+                    logits = model(xc, xb, mb, gb)
                     loss = loss_fn(logits, yb)
-                    val_loss += loss.item() * xb.size(0)
+                    val_loss += loss.item() * xc.size(0)
 
                     preds = torch.argmax(logits, dim=1)
                     correct += (preds == yb).sum().item()
@@ -407,14 +695,16 @@ class TransformerClassifier(Classifier):
         if self.model is None:
             raise AvocadoException("Model has not been trained yet.")
 
-        features, mask = self._parse_features(dataset)
+        cont_features, band_ids, mask, global_feats = self._parse_features(dataset)
 
-        X = torch.tensor(features, dtype=torch.float32).to(self.device)
+        Xc = torch.tensor(cont_features, dtype=torch.float32).to(self.device)
+        Xb = torch.tensor(band_ids, dtype=torch.long).to(self.device)
         M = torch.tensor(mask, dtype=torch.float32).to(self.device)
+        G = torch.tensor(global_feats, dtype=torch.float32).to(self.device)
 
         self.model.eval()
         with torch.no_grad():
-            logits = self.model(X, M)
+            logits = self.model(Xc, Xb, M, G)
             probs = F.softmax(logits, dim=1).cpu().numpy()
 
         predictions = pd.DataFrame(
