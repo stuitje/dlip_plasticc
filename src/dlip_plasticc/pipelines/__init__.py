@@ -1,6 +1,7 @@
 from .predict import (
     combine_predictions,
     load_feature_chunk,
+    predict_hybrid_partial,
     predict_partial_from_dataset,
     predict_partial_from_feature_chunks,
     save_chunk_predictions,
@@ -21,6 +22,7 @@ from .blend import (
 __all__ = [
     "combine_predictions",
     "load_feature_chunk",
+    "predict_hybrid_partial",
     "predict_partial_from_dataset",
     "predict_partial_from_feature_chunks",
     "save_chunk_predictions",
