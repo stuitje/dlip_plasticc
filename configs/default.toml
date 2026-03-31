@@ -1,0 +1,38 @@
+[paths]
+data_dir = "/scratch/s4339150/plasticc/data"
+features_dir = "/scratch/s4339150/plasticc/features"
+predictions_dir = "/scratch/s4339150/plasticc/predictions"
+classifiers_dir = "/scratch/s4339150/plasticc/classifiers"
+runs_dir = "/scratch/s4339150/plasticc/runs"
+
+[dataset]
+train_name = "plasticc_augment"
+test_name = "plasticc_test"
+total_chunks = 500
+
+[training]
+num_folds = 5
+random_state = 42
+batch_size = 64
+num_epochs = 100
+lr = 1e-4
+weight_decay = 1e-2
+early_stopping_patience = 20
+lr_scheduler_factor = 0.5
+lr_scheduler_patience = 2
+min_lr = 1e-6
+
+[features.sequence]
+seq_len = 350
+
+[model.transformer]
+d_model = 128
+nhead = 4
+num_layers = 4
+dim_feedforward = 256
+dropout = 0.2
+
+[model.cnn]
+num_epochs = 10
+batch_size = 64
+lr = 1e-3
