@@ -30,42 +30,56 @@ except Exception as exc:
     nn = _NNFallback()
 
 
-class _TimePositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding driven by actual observation timestamps.
+class _LearnedTimeEmbedding(nn.Module):
+    """Learned embedding from continuous time features.
 
-    Unlike index-based positional encoding, this uses the real (normalised)
-    time value of each observation so the model understands irregular cadence:
-    a 1-day gap and a 30-day gap produce very different encodings.
+    This is intentionally gentler than a hard sinusoidal positional encoding.
+    For irregular light curves, it is often better to let the model learn how
+    much timing information matters rather than forcing a highly oscillatory
+    absolute-time code.
 
-    Channel 0 of cont_x is expected to hold the normalised time value.
+    Inputs
+    ------
+    times : torch.Tensor
+        Shape (B, T). Expected to be normalized observation times, typically
+        in [0, 1].
+
+    cont_x : torch.Tensor
+        Shape (B, T, C). Channel 0 is expected to be time. If channel 1 exists,
+        it is assumed to be log_dt by convention from the parser.
+
+    Output
+    ------
+    torch.Tensor
+        Shape (B, T, d_model), to be added to token representations.
     """
 
-    def __init__(self, d_model):
+    def __init__(self, d_model, hidden_dim=32, dropout=0.0):
         super().__init__()
-        half_dim = d_model // 2
-        i = torch.arange(0, half_dim, dtype=torch.float32)
-        self.register_buffer(
-            "div_term",
-            torch.exp(i * (-np.log(10000.0) / d_model)),
+        self.net = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, d_model),
+            nn.Dropout(dropout),
         )
-        self.d_model = d_model
+        self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, times):
-        # times: (B, T)  -- normalised observation timestamps in [0, 1]
-        t = times.unsqueeze(-1) * 10000.0        # scale up for sine resolution
-        pe = torch.cat(
-            [torch.sin(t * self.div_term),
-             torch.cos(t * self.div_term)],
-            dim=-1,
-        )
-        # Handle odd d_model: pad by one zero column
-        if pe.shape[-1] < self.d_model:
-            pad = torch.zeros(
-                pe.shape[0], pe.shape[1], self.d_model - pe.shape[-1],
-                device=pe.device, dtype=pe.dtype,
-            )
-            pe = torch.cat([pe, pad], dim=-1)
-        return pe
+    def forward(self, times, cont_x):
+        # times: (B, T)
+        # cont_x: (B, T, C)
+
+        dt = torch.diff(times, dim=1, prepend=times[:, :1])
+        dt = torch.clamp(dt, min=0.0)
+
+        if cont_x.shape[-1] > 1:
+            # Parser convention: channel 1 is log_dt
+            log_dt = cont_x[:, :, 1]
+        else:
+            log_dt = torch.log1p(dt)
+
+        time_feats = torch.stack([times, dt, log_dt], dim=-1)  # (B, T, 3)
+        emb = self.net(time_feats)
+        return self.norm(emb)
 
 
 class _AttentionPool(nn.Module):
@@ -79,10 +93,19 @@ class _AttentionPool(nn.Module):
         # x: (B, T, D), mask: (B, T)
         scores = self.score(x).squeeze(-1)  # (B, T)
 
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
+        if mask is None:
+            weights = torch.softmax(scores, dim=1)
+            pooled = torch.sum(x * weights.unsqueeze(-1), dim=1)
+            return pooled
 
-        weights = torch.softmax(scores, dim=1)
+        mask = mask.to(dtype=x.dtype)
+        neg_large = torch.finfo(scores.dtype).min
+        scores = scores.masked_fill(mask == 0, neg_large)
+
+        weights = torch.softmax(scores, dim=1) * mask
+        weight_sums = weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        weights = weights / weight_sums
+
         pooled = torch.sum(x * weights.unsqueeze(-1), dim=1)
         return pooled
 
@@ -100,6 +123,7 @@ class _TransformerNet(nn.Module):
         num_layers=3,
         dim_feedforward=256,
         dropout=0.2,
+        time_hidden_dim=32,
     ):
         super().__init__()
 
@@ -113,7 +137,13 @@ class _TransformerNet(nn.Module):
         self.band_emb = nn.Embedding(num_bands, band_emb_dim)
 
         self.input_norm = nn.LayerNorm(d_model)
-        self.time_pe = _TimePositionalEncoding(d_model)
+
+        # Learned time embedding replaces the old sinusoidal positional encoding.
+        self.time_emb = _LearnedTimeEmbedding(
+            d_model=d_model,
+            hidden_dim=time_hidden_dim,
+            dropout=dropout,
+        )
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -142,24 +172,26 @@ class _TransformerNet(nn.Module):
         )
 
     def forward(self, cont_x, band_ids, mask=None, global_feats=None):
-        # cont_x:   (B, T, C_cont)  -- channel 0 is normalised time
+        # cont_x:   (B, T, C_cont)  -- channel 0 is normalized time
         # band_ids: (B, T)
         # mask:     (B, T)
         # global:   (B, C_global)
 
-        # Extract timestamps before normalising cont_x, so PE uses raw [0,1] values
-        times = cont_x[:, :, 0]   # (B, T)
+        # Extract timestamps before normalization so the time embedding sees
+        # the raw normalized time values.
+        times = cont_x[:, :, 0]  # (B, T)
 
-        cont_x = self.cont_norm(cont_x)
-        x_cont = self.cont_proj(cont_x)
+        cont_x_norm = self.cont_norm(cont_x)
+        x_cont = self.cont_proj(cont_x_norm)
 
-        # Clamp to valid embedding range just in case
         band_ids = torch.clamp(band_ids, min=0, max=self.band_emb.num_embeddings - 1)
         x_band = self.band_emb(band_ids)
 
         x = torch.cat([x_cont, x_band], dim=-1)
         x = self.input_norm(x)
-        x = x + self.time_pe(times)   # add time-based positional encoding
+
+        # Gentle learned time embedding instead of hard sinusoidal PE.
+        x = x + self.time_emb(times, cont_x)
 
         pad_mask = None
         if mask is not None:
@@ -205,6 +237,7 @@ class TransformerClassifier(Classifier):
     -----
     - Uses band embeddings rather than scalar band IDs.
     - Uses attention pooling instead of plain masked mean.
+    - Uses a learned time embedding instead of a fixed sinusoidal encoding.
     - Derives lightweight global summary features if they are not provided.
     """
 
@@ -225,6 +258,7 @@ class TransformerClassifier(Classifier):
         dim_feedforward=256,
         dropout=0.2,
         num_bands=6,
+        time_hidden_dim=32,
     ):
         super().__init__(name)
 
@@ -243,6 +277,7 @@ class TransformerClassifier(Classifier):
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
         self.num_bands = num_bands
+        self.time_hidden_dim = time_hidden_dim
 
         self.model = None
         self.class_names = None
@@ -262,7 +297,7 @@ class TransformerClassifier(Classifier):
         Rules
         -----
         - ``auto_class_weights=True``: inverse-frequency weights computed from
-          the training split, normalised so the mean weight = 1.
+          the training split, normalized so the mean weight = 1.
         - ``class_weights`` dict: per-class multipliers; missing classes default
           to 1.0.
         - Both can be combined — the dict is applied on top of auto weights
@@ -278,9 +313,9 @@ class TransformerClassifier(Classifier):
             counts = np.bincount(
                 class_indices_train, minlength=len(class_names)
             ).astype(np.float32)
-            counts = np.where(counts == 0, 1.0, counts)   # avoid div-by-zero
+            counts = np.where(counts == 0, 1.0, counts)  # avoid div-by-zero
             inv_freq = 1.0 / counts
-            inv_freq /= inv_freq.mean()                    # normalise: mean = 1
+            inv_freq /= inv_freq.mean()  # normalize: mean = 1
             weights *= inv_freq
 
         if self.class_weights is not None:
@@ -541,6 +576,7 @@ class TransformerClassifier(Classifier):
             num_layers=self.num_layers,
             dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
+            time_hidden_dim=self.time_hidden_dim,
         ).to(device)
 
         weight_tensor = self._build_class_weight_tensor(
