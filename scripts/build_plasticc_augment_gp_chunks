@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+
+# params 
+
+CONFIG_DEFAULT_PATH = '/home6/s4339150/Courses/dlip_plasticc/configs/default.toml'
+CONFIG_LOCAL_PATH   = '/home6/s4339150/Courses/dlip_plasticc/configs/local.toml'
+
+DATASET_NAME = 'plasticc_augment'
+NUM_CHUNKS   = 100          
+
+OUT_PATH = '/scratch/s4339150/plasticc/data/plasticc_augment_gp.h5'
+OVERWRITE = True          
+
+N_TIMESTEPS = 200          
+COMPRESSION = 'gzip'
+
+from pathlib import Path
+import os
+
+import h5py
+import numpy as np
+import pandas as pd
+from tqdm.auto import tqdm
+
+import avocado
+
+from dlip_plasticc.config import load_config, apply_avocado_settings
+from dlip_plasticc.pipelines.gp_fit import PlasticcGPGridSequenceFeaturizer
+
+cfg = load_config(CONFIG_DEFAULT_PATH, CONFIG_LOCAL_PATH)
+apply_avocado_settings(cfg)
+
+print('Using avocado paths:')
+print('  data_directory       =', avocado.settings['data_directory'])
+print('  features_directory   =', avocado.settings['features_directory'])
+print('  predictions_directory=', avocado.settings['predictions_directory'])
+print('  classifier_directory =', avocado.settings['classifier_directory'])
+
+out_path = Path(OUT_PATH)
+out_path.parent.mkdir(parents=True, exist_ok=True)
+
+if out_path.exists():
+    print(f'Output file already exists: {out_path}')
+    if OVERWRITE:
+        print('OVERWRITE=True -> removing old file.')
+        out_path.unlink()
+    else:
+        raise FileExistsError(f'{out_path} already exists and OVERWRITE=False')
+
+gp_featurizer = PlasticcGPGridSequenceFeaturizer(n_timesteps=N_TIMESTEPS)
+
+def raw_gp_to_transformer_arrays(raw_features: pd.DataFrame):
+    """Convert raw GP-grid outputs into transformer-friendly arrays.
+
+    Expected raw_features columns from PlasticcGPGridFeaturizer:
+      - 'flux'  : each row is (T, 6)
+      - 'sigma' : each row is (T, 6)
+
+    Returns
+    -------
+    cont_features : np.ndarray, shape (N, T, 13)
+        [time_norm, flux_u..y, sigma_u..y]
+    band_ids : np.ndarray, shape (N, T)
+        Dummy zeros, because all bands are already present in each timestep.
+    mask : np.ndarray, shape (N, T)
+        All ones, because every grid step is valid.
+    """
+    flux = np.stack(raw_features['flux'].values).astype(np.float32)    # (N, T, 6)
+    sigma = np.stack(raw_features['sigma'].values).astype(np.float32)  # (N, T, 6)
+
+    n_objects, n_timesteps, n_bands = flux.shape
+    if n_timesteps != N_TIMESTEPS:
+        raise ValueError(f'Expected {N_TIMESTEPS} timesteps, got {n_timesteps}')
+    if n_bands != 6:
+        raise ValueError(f'Expected 6 bands, got {n_bands}')
+
+    time_norm = np.linspace(0.0, 1.0, n_timesteps, dtype=np.float32)
+    time_norm = np.broadcast_to(time_norm[None, :, None], (n_objects, n_timesteps, 1))
+
+    cont_features = np.concatenate([time_norm, flux, sigma], axis=2).astype(np.float32)
+    band_ids = np.zeros((n_objects, n_timesteps), dtype=np.int64)
+    mask = np.ones((n_objects, n_timesteps), dtype=np.float32)
+
+    return cont_features, band_ids, mask
+
+
+# Write chunked features into a single HDF5 file 
+
+total_written = 0
+
+with h5py.File(out_path, 'w') as f:
+    first_chunk = True
+
+    for chunk in tqdm(range(NUM_CHUNKS), desc='Chunks'):
+        ds = avocado.load(
+            DATASET_NAME,
+            chunk=chunk,
+            num_chunks=NUM_CHUNKS,
+            metadata_only=False,
+        )
+
+        ds.extract_raw_features(gp_featurizer)
+        raw = ds.raw_features.copy()
+
+        object_id = ds.metadata.index.to_numpy()
+        cont_features, band_ids, mask = raw_gp_to_transformer_arrays(raw)
+
+        n = cont_features.shape[0]
+        T = cont_features.shape[1]
+        C = cont_features.shape[2]
+
+        if first_chunk:
+            f.create_dataset(
+                'object_id',
+                data=object_id.astype('S'),
+                maxshape=(None,),
+                compression=COMPRESSION,
+            )
+            f.create_dataset(
+                'cont_features',
+                data=cont_features,
+                maxshape=(None, T, C),
+                compression=COMPRESSION,
+            )
+            f.create_dataset(
+                'band_ids',
+                data=band_ids,
+                maxshape=(None, T),
+                compression=COMPRESSION,
+            )
+            f.create_dataset(
+                'mask',
+                data=mask,
+                maxshape=(None, T),
+                compression=COMPRESSION,
+            )
+
+            f.attrs['dataset_name'] = DATASET_NAME
+            f.attrs['num_chunks'] = NUM_CHUNKS
+            f.attrs['n_timesteps'] = N_TIMESTEPS
+            f.attrs['cont_dim'] = C
+            f.attrs['description'] = (
+                'Transformer-ready GP-grid features built from PlasticcGPGridFeaturizer'
+            )
+
+            total_written = n
+            first_chunk = False
+        else:
+            f['object_id'].resize((total_written + n,))
+            f['object_id'][total_written:total_written + n] = object_id.astype('S')
+
+            f['cont_features'].resize((total_written + n, T, C))
+            f['cont_features'][total_written:total_written + n] = cont_features
+
+            f['band_ids'].resize((total_written + n, T))
+            f['band_ids'][total_written:total_written + n] = band_ids
+
+            f['mask'].resize((total_written + n, T))
+            f['mask'][total_written:total_written + n] = mask
+
+            total_written += n
+
+        print(
+            f'chunk={chunk:02d}  wrote={n:6d}  total={total_written:7d}  '
+            f'shape={cont_features.shape}'
+        )
+
+print(f'Finished writing: {out_path}')
+
+
+#  Quick sanity check
+
+with h5py.File(out_path, 'r') as f:
+    print('datasets:')
+    for key in f.keys():
+        print(f'  {key}: {f[key].shape}  dtype={f[key].dtype}')
+
+    print('\nattrs:')
+    for key, val in f.attrs.items():
+        print(f'  {key}: {val}')
+
+    sample_ids = f['object_id'][:5].astype(str)
+    print('\nfirst object ids:', sample_ids)
+
+
+# load the saved arrays
+
+with h5py.File(out_path, 'r') as f:
+    object_id = f['object_id'][:].astype(str)
+    cont_features = f['cont_features'][:]
+    band_ids = f['band_ids'][:]
+    mask = f['mask'][:]
+
+print('object_id:', object_id.shape)
+print('cont_features:', cont_features.shape)
+print('band_ids:', band_ids.shape)
+print('mask:', mask.shape)
+
