@@ -10,7 +10,7 @@ from avocado.utils import AvocadoException
 
 
 class MLPClassifier(Classifier):
-    """MLP-based classifier using PyTorch.
+    """Residual MLP classifier using PyTorch.
 
     Features
     --------
@@ -25,7 +25,8 @@ class MLPClassifier(Classifier):
         2) precomputed 2D feature arrays,
         3) precomputed raw feature tables loaded from disk.
     - Optional standardisation using training-split statistics only.
-    - Optional label smoothing for improved calibration / log-loss stability.
+    - Optional label smoothing.
+    - Optional per-epoch validation flat-weighted log-loss tracking.
 
     Notes
     -----
@@ -48,6 +49,9 @@ class MLPClassifier(Classifier):
         use_batch_norm=True,
         standardize=True,
         label_smoothing=0.05,
+        track_flat_score=True,
+        flat_class_weights=None,
+        metric_clip_eps=1e-15,
     ):
         super().__init__(name)
 
@@ -63,6 +67,9 @@ class MLPClassifier(Classifier):
         self.use_batch_norm = use_batch_norm
         self.standardize = standardize
         self.label_smoothing = label_smoothing
+        self.track_flat_score = track_flat_score
+        self.flat_class_weights = flat_class_weights
+        self.metric_clip_eps = metric_clip_eps
 
         self.model = None
         self.class_names = None
@@ -80,25 +87,75 @@ class MLPClassifier(Classifier):
 
     def _build_model(self, input_dim, num_classes):
         try:
+            import torch
             import torch.nn as nn
         except Exception as exc:
             raise AvocadoException(
                 "PyTorch is required for MLPClassifier but is not installed."
             ) from exc
 
-        layers = []
-        prev_dim = input_dim
+        if len(self.hidden_dims) == 0:
+            raise AvocadoException("hidden_dims must contain at least one layer.")
 
-        for hidden_dim in self.hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            if self.use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.GELU())
-            layers.append(nn.Dropout(self.dropout))
-            prev_dim = hidden_dim
+        class ResidualBlock(nn.Module):
+            def __init__(self, in_dim, out_dim, dropout=0.3, use_batch_norm=True):
+                super().__init__()
 
-        layers.append(nn.Linear(prev_dim, num_classes))
-        return nn.Sequential(*layers)
+                self.lin1 = nn.Linear(in_dim, out_dim)
+                self.bn1 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
+                self.lin2 = nn.Linear(out_dim, out_dim)
+                self.bn2 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
+
+                self.act = nn.GELU()
+                self.dropout = nn.Dropout(dropout)
+                self.skip = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+
+            def forward(self, x):
+                residual = self.skip(x)
+
+                x = self.lin1(x)
+                x = self.bn1(x)
+                x = self.act(x)
+                x = self.dropout(x)
+
+                x = self.lin2(x)
+                x = self.bn2(x)
+
+                x = x + residual
+                x = self.act(x)
+                x = self.dropout(x)
+                return x
+
+        class ResidualMLP(nn.Module):
+            def __init__(self, input_dim, hidden_dims, num_classes, dropout, use_batch_norm):
+                super().__init__()
+
+                dims = [input_dim] + list(hidden_dims)
+                self.blocks = nn.ModuleList(
+                    [
+                        ResidualBlock(
+                            dims[i],
+                            dims[i + 1],
+                            dropout=dropout,
+                            use_batch_norm=use_batch_norm,
+                        )
+                        for i in range(len(dims) - 1)
+                    ]
+                )
+                self.head = nn.Linear(hidden_dims[-1], num_classes)
+
+            def forward(self, x):
+                for block in self.blocks:
+                    x = block(x)
+                return self.head(x)
+
+        return ResidualMLP(
+            input_dim=input_dim,
+            hidden_dims=self.hidden_dims,
+            num_classes=num_classes,
+            dropout=self.dropout,
+            use_batch_norm=self.use_batch_norm,
+        )
 
     def _coerce_2d_features(self, features, source="features"):
         """Validate/sanitise flat features and ensure shape (n, f)."""
@@ -225,6 +282,26 @@ class MLPClassifier(Classifier):
 
         return torch.tensor(weights, dtype=torch.float32).to(device)
 
+    def _compute_flat_score(self, true_labels, probs, class_names):
+        """Compute PLAsTiCC-style flat-weighted log-loss on a validation fold."""
+        import avocado
+
+        pred_df = pd.DataFrame(probs, columns=class_names)
+
+        if self.metric_clip_eps is not None and self.metric_clip_eps > 0:
+            pred_df = pred_df.clip(lower=self.metric_clip_eps, upper=1.0)
+            pred_df = pred_df.div(pred_df.sum(axis=1), axis=0)
+
+        class_weights = self.flat_class_weights
+        if class_weights is None:
+            class_weights = avocado.plasticc.plasticc_flat_weights
+
+        return avocado.weighted_multi_logloss(
+            np.asarray(true_labels),
+            pred_df,
+            class_weights=class_weights,
+        )
+
     # ------------------------------------------------------------------ #
     # Public API                                                         #
     # ------------------------------------------------------------------ #
@@ -298,6 +375,7 @@ class MLPClassifier(Classifier):
 
         y_train_np = class_indices[train_mask]
         y_val_np = class_indices[val_mask]
+        y_val_labels = object_classes[val_mask]
 
         device = self.device
         if device is None:
@@ -387,6 +465,7 @@ class MLPClassifier(Classifier):
             model.eval()
             val_loss = 0.0
             val_correct = 0
+            val_probs_chunks = []
 
             with torch.no_grad():
                 for xb, yb in val_loader:
@@ -395,27 +474,46 @@ class MLPClassifier(Classifier):
                     val_loss += loss_fn(logits, yb).item() * xb.size(0)
                     val_correct += (logits.argmax(1) == yb).sum().item()
 
+                    probs = torch.softmax(logits, dim=1).cpu().numpy()
+                    val_probs_chunks.append(probs)
+
             val_loss /= len(val_ds)
             val_acc = val_correct / len(val_ds)
+            val_probs = np.concatenate(val_probs_chunks, axis=0)
+
+            val_flat_score = np.nan
+            if self.track_flat_score:
+                try:
+                    val_flat_score = self._compute_flat_score(
+                        true_labels=y_val_labels,
+                        probs=val_probs,
+                        class_names=class_names,
+                    )
+                except Exception:
+                    val_flat_score = np.nan
 
             scheduler.step(val_loss)
             lr = optimizer.param_groups[0]["lr"]
 
-            history.append(
-                dict(
-                    epoch=epoch + 1,
-                    train_loss=train_loss,
-                    train_acc=train_acc,
-                    val_loss=val_loss,
-                    val_acc=val_acc,
-                    lr=lr,
-                )
+            history_row = dict(
+                epoch=epoch + 1,
+                train_loss=train_loss,
+                train_acc=train_acc,
+                val_loss=val_loss,
+                val_acc=val_acc,
+                lr=lr,
             )
+            if self.track_flat_score:
+                history_row["val_flat_score"] = val_flat_score
+            history.append(history_row)
 
             msg = (
                 "Epoch %d  train=%.5f  train_acc=%.4f  val=%.5f  val_acc=%.4f  lr=%.2e"
                 % (epoch + 1, train_loss, train_acc, val_loss, val_acc, lr)
             )
+            if self.track_flat_score and np.isfinite(val_flat_score):
+                msg += "  flat=%.5f" % val_flat_score
+
             tqdm.write(msg) if show_progress else print(msg)
 
             if val_loss < best_val_loss:
