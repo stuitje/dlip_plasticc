@@ -47,7 +47,7 @@ class MLPClassifier(Classifier):
         device=None,
         use_batch_norm=True,
         standardize=True,
-        label_smoothing=0.0, #0.05
+        label_smoothing=0.05,
     ):
         super().__init__(name)
 
