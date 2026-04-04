@@ -1,0 +1,113 @@
+#!/usr/bin/env python
+"""Generate a confusion matrix from a trained avocado classifier.
+
+Uses the cross-validation predictions stored in the classifier from training.
+This gives an honest out-of-sample estimate of classifier performance.
+
+Usage:
+    python avocado_confusion_matrix plasticc_test redshift_weight_noaug
+"""
+
+import argparse
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+import avocado
+
+
+# PLAsTiCC class ID -> human-readable label
+CLASS_LABELS = {
+    6:  'Single μ-lens',
+    15: 'TDE',
+    16: 'Eclip. Binary',
+    42: 'SN II',
+    52: 'SN Iax',
+    53: 'Mira',
+    62: 'SN Ibc',
+    64: 'Kilonova',
+    65: 'M-dwarf',
+    67: 'SN Ia-91bg',
+    88: 'AGN',
+    90: 'SN Ia',
+    92: 'RR Lyrae',
+    95: 'SLSN',
+}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        'classifier',
+        help='Name of the classifier to load.'
+    )
+    parser.add_argument(
+        '--output',
+        default='confusion_matrix.png',
+        help='Output filename for the confusion matrix plot. '
+        '(default: %(default)s)',
+    )
+
+    args = parser.parse_args()
+
+    # Load the trained classifier (contains CV predictions)
+    print("Loading classifier '%s'..." % args.classifier)
+    classifier = avocado.load_classifier(args.classifier)
+
+    # Access stored cross-validation predictions and true classes
+    predictions = classifier.train_predictions
+    true_classes = classifier.train_classes
+
+    print("Number of objects: %d" % len(true_classes))
+    print("Classes found: %s" % sorted(true_classes.unique()))
+
+    # Predicted class = highest probability
+    pred_classes = predictions.idxmax(axis=1)
+
+    # Get sorted class list
+    class_names = sorted(true_classes.unique())
+    num_classes = len(class_names)
+
+    # Build confusion matrix (normalized by true class)
+    cm = np.zeros((num_classes, num_classes))
+    for i, true_class in enumerate(class_names):
+        true_mask = true_classes == true_class
+        total = true_mask.sum()
+        if total == 0:
+            continue
+        for j, pred_class in enumerate(class_names):
+            cm[i, j] = ((pred_classes[true_mask] == pred_class).sum()
+                        / total)
+
+    # Get display labels
+    display_labels = [CLASS_LABELS.get(c, str(c)) for c in class_names]
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(14, 12))
+    im = ax.imshow(cm, cmap='Blues', vmin=0, vmax=1)
+
+    # Add text annotations
+    for i in range(num_classes):
+        for j in range(num_classes):
+            val = cm[i, j]
+            color = 'white' if val > 0.5 else 'black'
+            ax.text(j, i, '%.2f' % val, ha='center', va='center',
+                    color=color, fontsize=8)
+
+    ax.set_xticks(range(num_classes))
+    ax.set_yticks(range(num_classes))
+    ax.set_xticklabels(display_labels, rotation=45, ha='right')
+    ax.set_yticklabels(display_labels)
+    ax.set_xlabel('Predicted class')
+    ax.set_ylabel('True class')
+    ax.set_title('Confusion Matrix – %s (CV predictions)' % args.classifier)
+
+    fig.colorbar(im, ax=ax, label='Fraction of objects', shrink=0.8)
+    plt.tight_layout()
+    plt.savefig(args.output, dpi=150)
+    print("Saved confusion matrix to '%s'" % args.output)
+
+
+if __name__ == "__main__":
+    main()
