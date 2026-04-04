@@ -1,3 +1,4 @@
+import warnings
 """Implementation of avocado components for the PLAsTiCC dataset"""
 
 import numpy as np
@@ -791,8 +792,8 @@ class PlasticcFeaturizer(Featurizer):
             rf["peaks_pos_lssty_frac_2"],
         ]
 
-        with np.warnings.catch_warnings():
-            np.warnings.filterwarnings("ignore", r"All-NaN slice encountered")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", r"All-NaN slice encountered")
             features["peak_frac_2"] = np.nanmedian(all_peak_pos_frac_2, axis=0)
 
         features["total_s2n"] = np.sqrt(
