@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -31,29 +32,6 @@ except Exception as exc:
 
 
 class _LearnedTimeEmbedding(nn.Module):
-    """Learned embedding from continuous time features.
-
-    This is intentionally gentler than a hard sinusoidal positional encoding.
-    For irregular light curves, it is often better to let the model learn how
-    much timing information matters rather than forcing a highly oscillatory
-    absolute-time code.
-
-    Inputs
-    ------
-    times : torch.Tensor
-        Shape (B, T). Expected to be normalized observation times, typically
-        in [0, 1].
-
-    cont_x : torch.Tensor
-        Shape (B, T, C). Channel 0 is expected to be time. If channel 1 exists,
-        it is assumed to be log_dt by convention from the parser.
-
-    Output
-    ------
-    torch.Tensor
-        Shape (B, T, d_model), to be added to token representations.
-    """
-
     def __init__(self, d_model, hidden_dim=32, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
@@ -65,33 +43,26 @@ class _LearnedTimeEmbedding(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, times, cont_x):
-        # times: (B, T)
-        # cont_x: (B, T, C)
-
         dt = torch.diff(times, dim=1, prepend=times[:, :1])
         dt = torch.clamp(dt, min=0.0)
 
         if cont_x.shape[-1] > 1:
-            # Parser convention: channel 1 is log_dt
             log_dt = cont_x[:, :, 1]
         else:
             log_dt = torch.log1p(dt)
 
-        time_feats = torch.stack([times, dt, log_dt], dim=-1)  # (B, T, 3)
+        time_feats = torch.stack([times, dt, log_dt], dim=-1)
         emb = self.net(time_feats)
         return self.norm(emb)
 
 
 class _AttentionPool(nn.Module):
-    """Masked attention pooling over the sequence dimension."""
-
     def __init__(self, d_model):
         super().__init__()
         self.score = nn.Linear(d_model, 1)
 
     def forward(self, x, mask):
-        # x: (B, T, D), mask: (B, T)
-        scores = self.score(x).squeeze(-1)  # (B, T)
+        scores = self.score(x).squeeze(-1)
 
         if mask is None:
             weights = torch.softmax(scores, dim=1)
@@ -135,10 +106,8 @@ class _TransformerNet(nn.Module):
         self.cont_norm = nn.LayerNorm(cont_dim)
         self.cont_proj = nn.Linear(cont_dim, cont_proj_dim)
         self.band_emb = nn.Embedding(num_bands, band_emb_dim)
-
         self.input_norm = nn.LayerNorm(d_model)
 
-        # Learned time embedding replaces the old sinusoidal positional encoding.
         self.time_emb = _LearnedTimeEmbedding(
             d_model=d_model,
             hidden_dim=time_hidden_dim,
@@ -154,7 +123,6 @@ class _TransformerNet(nn.Module):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
         self.pool = _AttentionPool(d_model)
 
         self.global_mlp = nn.Sequential(
@@ -172,14 +140,7 @@ class _TransformerNet(nn.Module):
         )
 
     def forward(self, cont_x, band_ids, mask=None, global_feats=None):
-        # cont_x:   (B, T, C_cont)  -- channel 0 is normalized time
-        # band_ids: (B, T)
-        # mask:     (B, T)
-        # global:   (B, C_global)
-
-        # Extract timestamps before normalization so the time embedding sees
-        # the raw normalized time values.
-        times = cont_x[:, :, 0]  # (B, T)
+        times = cont_x[:, :, 0]
 
         cont_x_norm = self.cont_norm(cont_x)
         x_cont = self.cont_proj(cont_x_norm)
@@ -189,17 +150,13 @@ class _TransformerNet(nn.Module):
 
         x = torch.cat([x_cont, x_band], dim=-1)
         x = self.input_norm(x)
-
-        # Gentle learned time embedding instead of hard sinusoidal PE.
         x = x + self.time_emb(times, cont_x)
 
         pad_mask = None
         if mask is not None:
-            # Transformer expects True for padded positions.
             pad_mask = mask == 0
 
         x = self.encoder(x, src_key_padding_mask=pad_mask)
-
         pooled = self.pool(x, mask)
 
         if global_feats is None:
@@ -212,35 +169,6 @@ class _TransformerNet(nn.Module):
 
 
 class TransformerClassifier(Classifier):
-    """Transformer-based classifier using PyTorch.
-
-    Supported featurizer outputs
-    ----------------------------
-    1. Legacy form:
-       - (features, mask)
-         where features has shape (n_samples, seq_len, channels)
-         and mask has shape (n_samples, seq_len).
-
-       For the current sequence featurizer, features are expected to contain:
-         [time, flux, flux_error, detected, band_id]
-
-       This classifier will automatically derive:
-         - log_dt from time
-         - snr from flux / flux_error
-         - band embedding from band_id
-
-    2. Richer form:
-       - (cont_features, band_ids, mask)
-       - (cont_features, band_ids, mask, global_features)
-
-    Notes
-    -----
-    - Uses band embeddings rather than scalar band IDs.
-    - Uses attention pooling instead of plain masked mean.
-    - Uses a learned time embedding instead of a fixed sinusoidal encoding.
-    - Derives lightweight global summary features if they are not provided.
-    """
-
     def __init__(
         self,
         name,
@@ -292,18 +220,6 @@ class TransformerClassifier(Classifier):
             ) from _TORCH_IMPORT_ERROR
 
     def _build_class_weight_tensor(self, class_names, class_indices_train, device):
-        """Return a 1-D weight tensor aligned to *class_names* order, or None.
-
-        Rules
-        -----
-        - ``auto_class_weights=True``: inverse-frequency weights computed from
-          the training split, normalized so the mean weight = 1.
-        - ``class_weights`` dict: per-class multipliers; missing classes default
-          to 1.0.
-        - Both can be combined — the dict is applied on top of auto weights
-          (multiplicative).
-        - If neither is set, returns None (uniform weighting).
-        """
         if not self.auto_class_weights and self.class_weights is None:
             return None
 
@@ -313,9 +229,9 @@ class TransformerClassifier(Classifier):
             counts = np.bincount(
                 class_indices_train, minlength=len(class_names)
             ).astype(np.float32)
-            counts = np.where(counts == 0, 1.0, counts)  # avoid div-by-zero
+            counts = np.where(counts == 0, 1.0, counts)
             inv_freq = 1.0 / counts
-            inv_freq /= inv_freq.mean()  # normalize: mean = 1
+            inv_freq /= inv_freq.mean()
             weights *= inv_freq
 
         if self.class_weights is not None:
@@ -325,15 +241,9 @@ class TransformerClassifier(Classifier):
         return torch.tensor(weights, dtype=torch.float32).to(device)
 
     def _derive_global_features(self, cont_features, mask):
-        """Derive lightweight per-object global summary features.
-
-        Output shape: (n_samples, 5)
-        """
         valid = mask.astype(np.float32)
         denom = np.clip(valid.sum(axis=1), 1.0, None)
 
-        # cont_features convention here:
-        # [time, log_dt, flux, flux_err, snr, detected, ...]
         flux = cont_features[:, :, 2]
         flux_err = cont_features[:, :, 3]
         snr = cont_features[:, :, 4]
@@ -349,13 +259,7 @@ class TransformerClassifier(Classifier):
         max_abs_snr[~np.isfinite(max_abs_snr)] = 0.0
 
         global_feats = np.stack(
-            [
-                valid_frac,
-                mean_abs_flux,
-                mean_flux_err,
-                max_abs_snr,
-                mean_detected,
-            ],
+            [valid_frac, mean_abs_flux, mean_flux_err, max_abs_snr, mean_detected],
             axis=1,
         ).astype(np.float32)
 
@@ -369,21 +273,18 @@ class TransformerClassifier(Classifier):
         mask = None
         global_feats = None
 
-        # Richer forms
         if isinstance(features, (tuple, list)):
             if len(features) == 4:
                 cont_features, band_ids, mask, global_feats = features
             elif len(features) == 3:
                 cont_features, band_ids, mask = features
             elif len(features) == 2:
-                # Legacy form: (features, mask)
                 features, mask = features
             else:
                 raise AvocadoException(
                     "Unsupported feature tuple format for TransformerClassifier."
                 )
 
-        # Legacy direct 3D array form
         if cont_features is None and band_ids is None:
             if hasattr(features, "values"):
                 features = features.values
@@ -402,8 +303,7 @@ class TransformerClassifier(Classifier):
 
             if features.shape[2] < 5:
                 raise AvocadoException(
-                    "Legacy sequence features must have at least 5 channels: "
-                    "[time, flux, flux_error, detected, band_id]."
+                    "Legacy sequence features must have at least 5 channels."
                 )
 
             if mask is None:
@@ -413,24 +313,19 @@ class TransformerClassifier(Classifier):
                     mask = mask.values
                 mask = np.asarray(mask, dtype=np.float32)
 
-            # Legacy convention:
-            # first channels are continuous, final channel is band_id
             time_chan = features[:, :, 0].astype(np.float32)
             flux_chan = features[:, :, 1].astype(np.float32)
             flux_err_chan = features[:, :, 2].astype(np.float32)
             detected_chan = features[:, :, 3].astype(np.float32)
             band_ids = np.rint(features[:, :, -1]).astype(np.int64)
 
-            # Derive log delta-time from normalized time
             dt = np.diff(time_chan, axis=1, prepend=time_chan[:, :1])
             dt = np.clip(dt, 0.0, None)
             log_dt = np.log1p(dt).astype(np.float32)
 
-            # Derive clipped S/N
             snr = flux_chan / (np.abs(flux_err_chan) + 1e-8)
             snr = np.clip(snr, -20.0, 20.0).astype(np.float32)
 
-            # Include any extra continuous channels between detected and band_id
             extra_cont = None
             if features.shape[2] > 5:
                 extra_cont = features[:, :, 4:-1].astype(np.float32)
@@ -450,7 +345,6 @@ class TransformerClassifier(Classifier):
             cont_features = np.concatenate(base_cont, axis=2).astype(np.float32)
 
         else:
-            # Richer form sanitization
             if hasattr(cont_features, "values"):
                 cont_features = cont_features.values
             if hasattr(band_ids, "values"):
@@ -470,9 +364,7 @@ class TransformerClassifier(Classifier):
                 )
 
             if cont_features.ndim != 3:
-                raise AvocadoException(
-                    "cont_features must have shape (n, seq_len, channels)."
-                )
+                raise AvocadoException("cont_features must have shape (n, seq_len, channels).")
             if band_ids.ndim != 2:
                 raise AvocadoException("band_ids must have shape (n, seq_len).")
             if mask.ndim != 2:
@@ -545,21 +437,28 @@ class TransformerClassifier(Classifier):
 
         Xc_train = torch.tensor(cont_features[train_mask], dtype=torch.float32)
         Xb_train = torch.tensor(band_ids[train_mask], dtype=torch.long)
-        M_train = torch.tensor(mask[train_mask], dtype=torch.float32)
-        G_train = torch.tensor(global_feats[train_mask], dtype=torch.float32)
-        y_train = torch.tensor(class_indices[train_mask], dtype=torch.long)
+        M_train  = torch.tensor(mask[train_mask], dtype=torch.float32)
+        G_train  = torch.tensor(global_feats[train_mask], dtype=torch.float32)
+        y_train  = torch.tensor(class_indices[train_mask], dtype=torch.long)
 
         Xc_val = torch.tensor(cont_features[val_mask], dtype=torch.float32)
         Xb_val = torch.tensor(band_ids[val_mask], dtype=torch.long)
-        M_val = torch.tensor(mask[val_mask], dtype=torch.float32)
-        G_val = torch.tensor(global_feats[val_mask], dtype=torch.float32)
-        y_val = torch.tensor(class_indices[val_mask], dtype=torch.long)
+        M_val  = torch.tensor(mask[val_mask], dtype=torch.float32)
+        G_val  = torch.tensor(global_feats[val_mask], dtype=torch.float32)
+        y_val  = torch.tensor(class_indices[val_mask], dtype=torch.long)
 
+        # ── FIX 1: pin_memory=False prevents CUDA pinned memory accumulation ──
         train_ds = TensorDataset(Xc_train, Xb_train, M_train, G_train, y_train)
-        val_ds = TensorDataset(Xc_val, Xb_val, M_val, G_val, y_val)
+        val_ds   = TensorDataset(Xc_val,   Xb_val,   M_val,   G_val,   y_val)
 
-        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
+        train_loader = DataLoader(
+            train_ds, batch_size=self.batch_size, shuffle=True,
+            pin_memory=False, num_workers=0,
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=self.batch_size, shuffle=False,
+            pin_memory=False, num_workers=0,
+        )
 
         device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -585,9 +484,7 @@ class TransformerClassifier(Classifier):
         loss_fn = nn.CrossEntropyLoss(weight=weight_tensor)
 
         optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.lr,
-            weight_decay=weight_decay,
+            model.parameters(), lr=self.lr, weight_decay=weight_decay,
         )
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -614,11 +511,11 @@ class TransformerClassifier(Classifier):
             train_loss = 0.0
 
             for xc, xb, mb, gb, yb in train_loader:
-                xc = xc.to(device)
-                xb = xb.to(device)
-                mb = mb.to(device)
-                gb = gb.to(device)
-                yb = yb.to(device)
+                xc = xc.to(device, non_blocking=True)
+                xb = xb.to(device, non_blocking=True)
+                mb = mb.to(device, non_blocking=True)
+                gb = gb.to(device, non_blocking=True)
+                yb = yb.to(device, non_blocking=True)
 
                 logits = model(xc, xb, mb, gb)
                 loss = loss_fn(logits, yb)
@@ -630,6 +527,9 @@ class TransformerClassifier(Classifier):
 
                 train_loss += loss.item() * xc.size(0)
 
+                # ── FIX 2: explicitly delete batch tensors each step ──────────
+                del xc, xb, mb, gb, yb, logits, loss
+
             train_loss /= len(train_ds)
 
             # ---- validation ----
@@ -640,11 +540,11 @@ class TransformerClassifier(Classifier):
 
             with torch.no_grad():
                 for xc, xb, mb, gb, yb in val_loader:
-                    xc = xc.to(device)
-                    xb = xb.to(device)
-                    mb = mb.to(device)
-                    gb = gb.to(device)
-                    yb = yb.to(device)
+                    xc = xc.to(device, non_blocking=True)
+                    xb = xb.to(device, non_blocking=True)
+                    mb = mb.to(device, non_blocking=True)
+                    gb = gb.to(device, non_blocking=True)
+                    yb = yb.to(device, non_blocking=True)
 
                     logits = model(xc, xb, mb, gb)
                     loss = loss_fn(logits, yb)
@@ -654,19 +554,26 @@ class TransformerClassifier(Classifier):
                     correct += (preds == yb).sum().item()
                     total += yb.size(0)
 
+                    # ── FIX 2 (val): same cleanup ─────────────────────────────
+                    del xc, xb, mb, gb, yb, logits, loss, preds
+
             val_loss /= len(val_ds)
             val_acc = correct / total if total > 0 else np.nan
 
             scheduler.step(val_loss)
             current_lr = optimizer.param_groups[0]["lr"]
 
+            # ── FIX 3: clear GPU cache + run gc each epoch ────────────────────
+            torch.cuda.empty_cache()
+            gc.collect()
+
             history.append(
                 {
                     "epoch": epoch + 1,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "lr": current_lr,
+                    "train_loss": float(train_loss),
+                    "val_loss": float(val_loss),
+                    "val_acc": float(val_acc) if not np.isnan(val_acc) else np.nan,
+                    "lr": float(current_lr),
                 }
             )
 
@@ -735,8 +642,8 @@ class TransformerClassifier(Classifier):
 
         Xc = torch.tensor(cont_features, dtype=torch.float32).to(self.device)
         Xb = torch.tensor(band_ids, dtype=torch.long).to(self.device)
-        M = torch.tensor(mask, dtype=torch.float32).to(self.device)
-        G = torch.tensor(global_feats, dtype=torch.float32).to(self.device)
+        M  = torch.tensor(mask, dtype=torch.float32).to(self.device)
+        G  = torch.tensor(global_feats, dtype=torch.float32).to(self.device)
 
         self.model.eval()
         with torch.no_grad():
