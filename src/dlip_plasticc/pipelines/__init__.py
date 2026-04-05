@@ -19,6 +19,8 @@ from .blend import (
     save_blended_predictions,
 )
 
+from .gp_fit import PlasticcGPGridSequenceFeaturizer
+
 __all__ = [
     "combine_predictions",
     "load_feature_chunk",
@@ -27,6 +29,7 @@ __all__ = [
     "predict_partial_from_feature_chunks",
     "save_chunk_predictions",
     "align_truth_and_predictions",
+    "PlasticcGPGridSequenceFeaturizer",
     "normalize_rows",
     "score_flat",
     "align_prediction_frames",
