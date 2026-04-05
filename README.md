@@ -1,11 +1,27 @@
-# Avocado
+# Avocado Reproduction
 
-Photometric Classification of Astronomical Transients and Variables With Biased
-Spectroscopic Samples
+Reproduction of [Boone (2019)](https://doi.org/10.3847/1538-3881/ab5182) `avocado` photometric transient classifier on the PLAsTiCC dataset. Completed as part of the course Deep Learning in Physics at RUG.
 
-[![Documentation Status](https://readthedocs.org/projects/avocado-classifier/badge/?version=latest)](https://avocado-classifier.readthedocs.io/en/latest/?badge=latest)
+## Results
 
-## About
+| Metric | Boone (2019) | This work |
+|--------|-------------|-----------|
+| Flat-weighted log-loss | 0.468 | 0.528 |
+| Redshift-weighted log-loss | 0.500 | 0.558 |
+| Kaggle metric | 0.649 | 0.713 |
+
+### Repository structure
+```
+avocado/ and scripts/ — patched avocado source (compatibility fixes)
+notebooks/            — paper figures notebook and executed version with results
+figures/              — reproduced figures as PDF
+avocado_settings.json — settings file (update paths for your system)
+```
+All other files are unchanged from the original Boone (2019) repository.
+
+We ran the code with Python 3.8.6 on the [Hábrók HPC cluster](https://wiki.hpc.rug.nl/habrok/introduction/start) using SLURM.
+
+## About avocado
 
 `avocado` is a general photometric classification code that is designed to
 produce classifications of arbitrary astronomical transients and variable
