@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """Merge all per-chunk .h5 files into a single final .h5 file.
-Run this after the SLURM array job completes:
-    python merge_chunks.py
 """
 
 from pathlib import Path
@@ -10,11 +8,11 @@ import numpy as np
 from tqdm.auto import tqdm
 
 # ── config ───────────────────────────────────────────────────────────────────
-CHUNK_DIR  = '/scratch/s4339150/plasticc/data/chunks'
-OUT_PATH   = '/scratch/s4339150/plasticc/data/plasticc_augment_gp.h5'
-NUM_CHUNKS = 100
+CHUNK_DIR  = '/scratch/s4339150/plasticc/data/chunks_test'
+OUT_PATH   = '/scratch/s4339150/plasticc/data/plasticc_test_gp.h5'
+NUM_CHUNKS = 21
 COMPRESSION = 'gzip'
-DATASET_NAME = 'plasticc_augment'
+DATASET_NAME = 'plasticc_test'
 N_TIMESTEPS  = 200
 
 chunk_dir = Path(CHUNK_DIR)
