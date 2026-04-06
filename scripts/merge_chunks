@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 # ── config ───────────────────────────────────────────────────────────────────
 CHUNK_DIR  = '/scratch/s4339150/plasticc/data/chunks_test'
 OUT_PATH   = '/scratch/s4339150/plasticc/data/plasticc_test_gp.h5'
-NUM_CHUNKS = 21
+NUM_CHUNKS = 100
 COMPRESSION = 'gzip'
 DATASET_NAME = 'plasticc_test'
 N_TIMESTEPS  = 200
