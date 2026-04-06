@@ -187,9 +187,9 @@ Training and evaluation notebooks are in the root directory:
 
 | Notebook | Description |
 |---|---|
-| `train_mlp.ipynb` | Train the residual MLP on avocado features |
-| `train_transformer.ipynb` | Train the transformer on raw light curves |
-| `train_transformer_gp.ipynb` | Train the transformer on GP-interpolated light curves |
+| `train_predict_score_mlp_plasticc.ipynb` | Train the residual MLP on avocado features |
+| `train_predict_score_transformer_plasticc_GP.ipynb` | Train the transformer on raw light curves |
+| `train_predict_score_transformer_plasticc.ipynb` | Train the transformer on GP-interpolated light curves |
 
 ## Repository
 
