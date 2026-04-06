@@ -8,7 +8,7 @@ from avocado.classifier import Classifier
 from avocado.settings import settings
 from avocado.utils import AvocadoException
 
-# ── Module-level model classes (required for pickle/classifier.write) ────────
+# Module-level model classes (required for pickle/classifier.write)
 try:
     import torch
     import torch.nn as nn
@@ -303,9 +303,7 @@ class MLPClassifier(Classifier):
             class_weights=class_weights,
         )
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
+    # Public API                                                           
 
     def train(
         self,

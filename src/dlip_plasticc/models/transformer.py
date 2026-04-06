@@ -10,7 +10,6 @@ from avocado.settings import settings
 from avocado.utils import AvocadoException
 
 # Optional PyTorch import at module level.
-# We keep the module importable even if torch is missing.
 _TORCH_IMPORT_ERROR = None
 try:
     import torch

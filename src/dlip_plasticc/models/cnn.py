@@ -357,7 +357,7 @@ class CNNClassifier(Classifier):
             iterator = tqdm(iterator, desc="Epochs", dynamic_ncols=True)
 
         for epoch in iterator:
-            # ---- train ----
+            # train
             model.train()
             train_loss = 0.0
             for xb, yb in train_loader:
@@ -373,7 +373,7 @@ class CNNClassifier(Classifier):
 
             train_loss /= len(train_ds)
 
-            # ---- validate ----
+            # validate 
             model.eval()
             val_loss = 0.0
             correct = 0
