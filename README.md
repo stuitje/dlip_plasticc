@@ -11,6 +11,47 @@ Other attempted pipelines and models are also present, but do not necessarily pe
 
 ## Project structure
 
+This branch (`main`) contains the `dlip_plasticc` package with additional classifiers on top of Avocado. For a reproduction of Avocado results, please visit the [reproduction branch](https://github.com/stuitje/dlip_plasticc/tree/daniil_reproduction), which keeps the repository structure of Avocado. For a redshift weighting analysis, please visit the [redshift weighting branch](https://github.com/stuitje/dlip_plasticc/tree/NA_zW). 
+
+### Repository structure: `main`
+
+The full repository is structured as follows. 
+
+```
+dlip_plasticc/
+├── avocado_settings.json          # avocado path configuration (loaded at runtime)
+├── configs/
+│   └── default.toml               # default training and path configuration
+├── jobs/
+│   ├── submit_chunks.sh           # SLURM array job for GP-fitting training set
+│   └── submit_chunks_test.sh      # SLURM array job for GP-fitting test set
+├── notebooks/                     # notebooks to generate main results
+│   ├── train_predict_score_mlp_plasticc.ipynb
+│   ├── train_predict_score_transformer_plasticc.ipynb
+│   └── train_predict_score_transformer_plasticc_GP.ipynb
+├── scripts/
+│   ├── run_chunk                  # process a single GP training chunk
+│   ├── run_chunk_test             # process a single GP test chunk
+│   ├── merge_chunks               # merge per-chunk .h5 files into one
+│   ├── build_plasticc_augment_gp_chunks
+│   └── train_classifier
+├── src/
+│   └── dlip_plasticc/
+│       ├── config.py              # configuration loading and avocado settings
+│       ├── features/
+│       │   ├── adapters.py        # feature format adapters
+│       │   └── sequence.py        # sequence featurizers for raw light curves
+│       ├── models/
+│       │   ├── mlp.py             # residual MLP classifier
+│       │   └── transformer.py     # transformer classifier
+│       └── pipelines/
+│           ├── blend.py           # prediction blending utilities, not used in the main pipeline
+│           ├── gp_fit.py          # GP grid featurizer for transformer input
+│           ├── predict.py         # prediction pipeline utilities
+│           └── score.py           # flat, redshift, and Kaggle scoring metrics
+├── pyproject.toml                 # package metadata and dependencies
+└── README.md
+```
 
 ## Installation
 
