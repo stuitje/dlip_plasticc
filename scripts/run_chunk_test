@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Process a single chunk and write it to its own .h5 file.
-Usage: run_chunk --chunk 0 --num-chunks 100
+Usage: run_chunk_test --chunk 0 --num-chunks 100
 """
 
 import argparse
@@ -18,14 +18,14 @@ from dlip_plasticc.pipelines.gp_fit import PlasticcGPGridSequenceFeaturizer
 # config parameters
 CONFIG_DEFAULT_PATH = '/home6/s4339150/Courses/dlip_plasticc/configs/default.toml'
 CONFIG_LOCAL_PATH   = '/home6/s4339150/Courses/dlip_plasticc/configs/local.toml'
-DATASET_NAME        = 'plasticc_augment'
-CHUNK_DIR           = '/scratch/s4339150/plasticc/data/chunks'   # one .h5 per chunk
+DATASET_NAME        = 'plasticc_test'
+CHUNK_DIR           = '/scratch/s4339150/plasticc/data/chunks_test'   # one .h5 per chunk
 N_TIMESTEPS         = 200
 COMPRESSION         = 'gzip'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--chunk',      type=int, required=True)
-parser.add_argument('--num-chunks', type=int, default=100)
+parser.add_argument('--num-chunks', type=int, default=500)
 args = parser.parse_args()
 
 chunk      = args.chunk
@@ -46,7 +46,7 @@ if out_path.exists():
     print(f'chunk {chunk} already exists, skipping.')
     raise SystemExit(0)
 
-# featurizer
+# featurizer 
 gp_featurizer = PlasticcGPGridSequenceFeaturizer(n_timesteps=N_TIMESTEPS)
 
 def raw_gp_to_transformer_arrays(raw_features: pd.DataFrame):
@@ -68,7 +68,7 @@ def raw_gp_to_transformer_arrays(raw_features: pd.DataFrame):
 
     return cont_features, band_ids, mask
 
-# process
+# process 
 t0 = time.time()
 
 ds = avocado.load(DATASET_NAME, chunk=chunk, num_chunks=num_chunks, metadata_only=False)
@@ -85,7 +85,7 @@ cont_features, band_ids, mask = raw_gp_to_transformer_arrays(raw)
 t3 = time.time()
 print(f'[chunk {chunk}] array conversion:     {t3-t2:.1f}s')
 
-# write (atomic)
+# write (atomic) 
 with h5py.File(tmp_path, 'w') as f:
     f.create_dataset('object_id',     data=object_id.astype('S'), compression=COMPRESSION)
     f.create_dataset('cont_features', data=cont_features,          compression=COMPRESSION)

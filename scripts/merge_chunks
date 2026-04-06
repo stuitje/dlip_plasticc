@@ -7,10 +7,10 @@ import h5py
 import numpy as np
 from tqdm.auto import tqdm
 
-# ── config ───────────────────────────────────────────────────────────────────
+# config parameters
 CHUNK_DIR  = '/scratch/s4339150/plasticc/data/chunks_test'
 OUT_PATH   = '/scratch/s4339150/plasticc/data/plasticc_test_gp.h5'
-NUM_CHUNKS = 21
+NUM_CHUNKS = 100
 COMPRESSION = 'gzip'
 DATASET_NAME = 'plasticc_test'
 N_TIMESTEPS  = 200
@@ -19,7 +19,7 @@ chunk_dir = Path(CHUNK_DIR)
 out_path  = Path(OUT_PATH)
 tmp_path  = out_path.with_suffix('.tmp.h5')
 
-# ── check all chunks are present ─────────────────────────────────────────────
+# check all chunks are present
 missing = []
 for i in range(NUM_CHUNKS):
     p = chunk_dir / f'chunk_{i:04d}.h5'
@@ -34,12 +34,12 @@ if missing:
 
 print(f'All {NUM_CHUNKS} chunks present. Merging...')
 
-# ── peek at first chunk to get shapes/dtypes ─────────────────────────────────
+# get shapes from first chunk
 with h5py.File(chunk_dir / 'chunk_0000.h5', 'r') as f0:
     T = f0['cont_features'].shape[1]
     C = f0['cont_features'].shape[2]
 
-# ── merge into tmp file, then rename atomically ───────────────────────────────
+# merge into tmp file, then rename atomically
 total_written = 0
 
 with h5py.File(tmp_path, 'w') as fout:
@@ -87,7 +87,7 @@ tmp_path.rename(out_path)
 print(f'\nMerge complete: {out_path}')
 print(f'Total objects written: {total_written}')
 
-# ── sanity check ─────────────────────────────────────────────────────────────
+# sanity check on merged file
 with h5py.File(out_path, 'r') as f:
     print('\ndatasets:')
     for key in f.keys():

@@ -59,9 +59,7 @@ from avocado.classifier import Classifier
 from avocado.settings import settings
 from avocado.utils import AvocadoException
 
-# --------------------------------------------------------------------------- #
-# Optional imports                                                             #
-# --------------------------------------------------------------------------- #
+# Optional imports                                                             
 _TORCH_IMPORT_ERROR = None
 try:
     import torch
@@ -227,9 +225,7 @@ class _SequenceEncoder(nn.Module):
         return self.head(emb)
 
 
-# --------------------------------------------------------------------------- #
-# Classifier                                                                  #
-# --------------------------------------------------------------------------- #
+####  Classifier                                                                  
 
 class TransformerGBMClassifier(Classifier):
     """Two-stage hybrid: sequence transformer embeddings + LightGBM.
@@ -373,9 +369,7 @@ class TransformerGBMClassifier(Classifier):
                 "Install it with: pip install lightgbm"
             ) from _LGBM_IMPORT_ERROR
 
-    # ------------------------------------------------------------------ #
-    # Class-weight helpers (shared by Stage 1 and Stage 2)               #
-    # ------------------------------------------------------------------ #
+    #### Class-weight helpers (shared by Stage 1 and Stage 2)               
 
     def _class_weight_array(self, class_names, class_indices_train):
         # Return a 1-D float32 array of per-class weights, or None.
@@ -418,9 +412,7 @@ class TransformerGBMClassifier(Classifier):
             return None
         return w[class_indices_train]
 
-    # ---------------------------------------------------------------------- #
-    # Sequence feature parsing (reused from TransformerClassifier)           #
-    # ---------------------------------------------------------------------- #
+    #### Sequence feature parsing (reused from TransformerClassifier)           
 
     def _get_seq_raw_features(self, dataset):
         """Extract sequence raw features, returning a DataFrame.
@@ -517,9 +509,7 @@ class TransformerGBMClassifier(Classifier):
         cont_features = np.concatenate(base_cont, axis=2).astype(np.float32)
         return cont_features, band_ids, mask.astype(np.float32)
 
-    # ---------------------------------------------------------------------- #
-    # GP tabular feature parsing                                             #
-    # ---------------------------------------------------------------------- #
+    ##### GP tabular feature parsing                                             
 
     def _get_gp_feature_frame(self, dataset, gp_raw=None) -> pd.DataFrame:
         """Return raw GP features as a DataFrame indexed by object_id.
@@ -598,10 +588,8 @@ class TransformerGBMClassifier(Classifier):
         scaled = scaled.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
         return scaled.values.astype(np.float32)
-
-    # ---------------------------------------------------------------------- #
-    # Stage 1 — train sequence transformer                                   #
-    # ---------------------------------------------------------------------- #
+    
+    #### Stage 1 — train sequence transformer                                   
 
     def _train_transformer(
         self,
@@ -758,10 +746,8 @@ class TransformerGBMClassifier(Classifier):
         self.history = pd.DataFrame(history)
         print("[Stage 1] Best transformer val loss: %.5f" % best_val_loss)
         return encoder
-
-    # ---------------------------------------------------------------------- #
-    # Stage 2 — extract embeddings and train LightGBM                        #
-    # ---------------------------------------------------------------------- #
+    
+    #### Stage 2 — extract embeddings and train LightGBM                        
 
     @torch.no_grad()
     def _extract_embeddings(
@@ -841,9 +827,7 @@ class TransformerGBMClassifier(Classifier):
         )
         return booster
 
-    # ---------------------------------------------------------------------- #
-    # Public API                                                             #
-    # ---------------------------------------------------------------------- #
+    #### Public API                                                             
 
     def train(
         self,
@@ -925,7 +909,7 @@ class TransformerGBMClassifier(Classifier):
         self._fit_gp_preprocessor(gp_df.loc[train_mask])
         gp_scaled = self._transform_gp_features(gp_df)
 
-        # ---- Stage 1: train transformer ---------------------------------- #
+        # Stage 1: train transformer 
         encoder = self._train_transformer(
             cont_features=cont_features,
             band_ids=band_ids,
@@ -942,7 +926,7 @@ class TransformerGBMClassifier(Classifier):
             early_stopping_patience=early_stopping_patience,
         )
 
-        # ---- Stage 2: extract embeddings + train LightGBM ---------------- #
+        # Stage 2: extract embeddings + train LightGBM 
         print("[Stage 2] Extracting transformer embeddings…")
         embeddings = self._extract_embeddings(encoder, cont_features, band_ids, mask)
 

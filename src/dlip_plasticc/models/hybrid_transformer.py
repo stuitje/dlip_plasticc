@@ -397,9 +397,7 @@ class HybridTransformerClassifier(Classifier):
 
         return cont_features, band_ids.astype(np.int64), mask.astype(np.float32)
 
-    # ------------------------------------------------------------------
-    # Tabular feature handling
-    # ------------------------------------------------------------------
+    #### Tabular feature handling
     def _get_tabular_feature_frame(self, dataset):
         if dataset.raw_features is None:
             if dataset.objects is None:
@@ -483,9 +481,7 @@ class HybridTransformerClassifier(Classifier):
 
         return feature_scaled.values.astype(np.float32)
 
-    # ------------------------------------------------------------------
-    # Training / prediction
-    # ------------------------------------------------------------------
+    #### Training / prediction
     def train(
         self,
         dataset,

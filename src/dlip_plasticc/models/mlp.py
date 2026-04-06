@@ -8,6 +8,60 @@ from avocado.classifier import Classifier
 from avocado.settings import settings
 from avocado.utils import AvocadoException
 
+# Module-level model classes (required for pickle/classifier.write)
+try:
+    import torch
+    import torch.nn as nn
+
+    class ResidualBlock(nn.Module):
+        def __init__(self, in_dim, out_dim, dropout=0.3, use_batch_norm=True):
+            super().__init__()
+            self.lin1 = nn.Linear(in_dim, out_dim)
+            self.bn1 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
+            self.lin2 = nn.Linear(out_dim, out_dim)
+            self.bn2 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
+            self.act = nn.GELU()
+            self.dropout = nn.Dropout(dropout)
+            self.skip = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+
+        def forward(self, x):
+            residual = self.skip(x)
+            x = self.lin1(x)
+            x = self.bn1(x)
+            x = self.act(x)
+            x = self.dropout(x)
+            x = self.lin2(x)
+            x = self.bn2(x)
+            x = x + residual
+            x = self.act(x)
+            x = self.dropout(x)
+            return x
+
+    class ResidualMLP(nn.Module):
+        def __init__(self, input_dim, hidden_dims, num_classes, dropout, use_batch_norm):
+            super().__init__()
+            dims = [input_dim] + list(hidden_dims)
+            self.blocks = nn.ModuleList(
+                [
+                    ResidualBlock(
+                        dims[i],
+                        dims[i + 1],
+                        dropout=dropout,
+                        use_batch_norm=use_batch_norm,
+                    )
+                    for i in range(len(dims) - 1)
+                ]
+            )
+            self.head = nn.Linear(hidden_dims[-1], num_classes)
+
+        def forward(self, x):
+            for block in self.blocks:
+                x = block(x)
+            return self.head(x)
+
+except ImportError:
+    pass
+
 
 class MLPClassifier(Classifier):
     """Residual MLP classifier using PyTorch.
@@ -82,12 +136,11 @@ class MLPClassifier(Classifier):
         self.feature_std_ = None
 
     # ------------------------------------------------------------------ #
-    # Internal helpers                                                   #
+    # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
 
     def _build_model(self, input_dim, num_classes):
         try:
-            import torch
             import torch.nn as nn
         except Exception as exc:
             raise AvocadoException(
@@ -96,58 +149,6 @@ class MLPClassifier(Classifier):
 
         if len(self.hidden_dims) == 0:
             raise AvocadoException("hidden_dims must contain at least one layer.")
-
-        class ResidualBlock(nn.Module):
-            def __init__(self, in_dim, out_dim, dropout=0.3, use_batch_norm=True):
-                super().__init__()
-
-                self.lin1 = nn.Linear(in_dim, out_dim)
-                self.bn1 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
-                self.lin2 = nn.Linear(out_dim, out_dim)
-                self.bn2 = nn.BatchNorm1d(out_dim) if use_batch_norm else nn.Identity()
-
-                self.act = nn.GELU()
-                self.dropout = nn.Dropout(dropout)
-                self.skip = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
-
-            def forward(self, x):
-                residual = self.skip(x)
-
-                x = self.lin1(x)
-                x = self.bn1(x)
-                x = self.act(x)
-                x = self.dropout(x)
-
-                x = self.lin2(x)
-                x = self.bn2(x)
-
-                x = x + residual
-                x = self.act(x)
-                x = self.dropout(x)
-                return x
-
-        class ResidualMLP(nn.Module):
-            def __init__(self, input_dim, hidden_dims, num_classes, dropout, use_batch_norm):
-                super().__init__()
-
-                dims = [input_dim] + list(hidden_dims)
-                self.blocks = nn.ModuleList(
-                    [
-                        ResidualBlock(
-                            dims[i],
-                            dims[i + 1],
-                            dropout=dropout,
-                            use_batch_norm=use_batch_norm,
-                        )
-                        for i in range(len(dims) - 1)
-                    ]
-                )
-                self.head = nn.Linear(hidden_dims[-1], num_classes)
-
-            def forward(self, x):
-                for block in self.blocks:
-                    x = block(x)
-                return self.head(x)
 
         return ResidualMLP(
             input_dim=input_dim,
@@ -302,9 +303,7 @@ class MLPClassifier(Classifier):
             class_weights=class_weights,
         )
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                         #
-    # ------------------------------------------------------------------ #
+    # Public API                                                           
 
     def train(
         self,
@@ -363,18 +362,18 @@ class MLPClassifier(Classifier):
             raise AvocadoException("Training split is empty.")
 
         X_train = X[train_mask].copy()
-        X_val = X[val_mask].copy()
+        X_val   = X[val_mask].copy()
 
         if self.standardize:
             self._fit_standardizer(X_train)
             X_train = self._apply_standardizer(X_train)
-            X_val = self._apply_standardizer(X_val)
+            X_val   = self._apply_standardizer(X_val)
         else:
             self.feature_mean_ = None
-            self.feature_std_ = None
+            self.feature_std_  = None
 
-        y_train_np = class_indices[train_mask]
-        y_val_np = class_indices[val_mask]
+        y_train_np   = class_indices[train_mask]
+        y_val_np     = class_indices[val_mask]
         y_val_labels = object_classes[val_mask]
 
         device = self.device
@@ -383,44 +382,29 @@ class MLPClassifier(Classifier):
         device = torch.device(device)
 
         X_train_t = torch.tensor(X_train, dtype=torch.float32)
-        X_val_t = torch.tensor(X_val, dtype=torch.float32)
+        X_val_t   = torch.tensor(X_val,   dtype=torch.float32)
         y_train_t = torch.tensor(y_train_np, dtype=torch.long)
-        y_val_t = torch.tensor(y_val_np, dtype=torch.long)
+        y_val_t   = torch.tensor(y_val_np,   dtype=torch.long)
 
         train_ds = TensorDataset(X_train_t, y_train_t)
-        val_ds = TensorDataset(X_val_t, y_val_t)
+        val_ds   = TensorDataset(X_val_t,   y_val_t)
 
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=self.batch_size,
-            shuffle=True,
-        )
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-        )
+        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
+        val_loader   = DataLoader(val_ds,   batch_size=self.batch_size, shuffle=False)
 
-        input_dim = X_train.shape[1]
+        input_dim   = X_train.shape[1]
         num_classes = len(class_names)
 
         model = self._build_model(input_dim, num_classes).to(device)
 
-        weight_tensor = self._build_weight_tensor(
-            class_names,
-            y_train_np,
-            device,
-        )
-
+        weight_tensor = self._build_weight_tensor(class_names, y_train_np, device)
         loss_fn = nn.CrossEntropyLoss(
             weight=weight_tensor,
             label_smoothing=self.label_smoothing,
         )
 
         optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.lr,
-            weight_decay=weight_decay,
+            model.parameters(), lr=self.lr, weight_decay=weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -432,9 +416,9 @@ class MLPClassifier(Classifier):
         )
 
         best_val_loss = np.inf
-        best_state = None
-        history = []
-        no_improve = 0
+        best_state    = None
+        history       = []
+        no_improve    = 0
 
         iterator = range(self.num_epochs)
         if show_progress:
@@ -443,42 +427,41 @@ class MLPClassifier(Classifier):
         for epoch in iterator:
             # ---- train ----
             model.train()
-            train_loss = 0.0
+            train_loss    = 0.0
             train_correct = 0
 
             for xb, yb in train_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 logits = model(xb)
-                loss = loss_fn(logits, yb)
+                loss   = loss_fn(logits, yb)
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                train_loss += loss.item() * xb.size(0)
+                train_loss    += loss.item() * xb.size(0)
                 train_correct += (logits.argmax(1) == yb).sum().item()
 
             train_loss /= len(train_ds)
-            train_acc = train_correct / len(train_ds)
+            train_acc   = train_correct / len(train_ds)
 
             # ---- validate ----
             model.eval()
-            val_loss = 0.0
-            val_correct = 0
+            val_loss         = 0.0
+            val_correct      = 0
             val_probs_chunks = []
 
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb, yb = xb.to(device), yb.to(device)
-                    logits = model(xb)
-                    val_loss += loss_fn(logits, yb).item() * xb.size(0)
+                    val_loss    += loss_fn(logits := model(xb), yb).item() * xb.size(0)
                     val_correct += (logits.argmax(1) == yb).sum().item()
-
-                    probs = torch.softmax(logits, dim=1).cpu().numpy()
-                    val_probs_chunks.append(probs)
+                    val_probs_chunks.append(
+                        torch.softmax(logits, dim=1).cpu().numpy()
+                    )
 
             val_loss /= len(val_ds)
-            val_acc = val_correct / len(val_ds)
+            val_acc   = val_correct / len(val_ds)
             val_probs = np.concatenate(val_probs_chunks, axis=0)
 
             val_flat_score = np.nan
@@ -513,12 +496,11 @@ class MLPClassifier(Classifier):
             )
             if self.track_flat_score and np.isfinite(val_flat_score):
                 msg += "  flat=%.5f" % val_flat_score
-
             tqdm.write(msg) if show_progress else print(msg)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_state = {
+                best_state    = {
                     k: v.detach().cpu().clone()
                     for k, v in model.state_dict().items()
                 }
@@ -527,9 +509,8 @@ class MLPClassifier(Classifier):
                 no_improve += 1
 
             if early_stopping_patience and no_improve >= early_stopping_patience:
-                msg = (
-                    "Early stopping at epoch %d.  Best val=%.5f"
-                    % (epoch + 1, best_val_loss)
+                msg = "Early stopping at epoch %d.  Best val=%.5f" % (
+                    epoch + 1, best_val_loss
                 )
                 tqdm.write(msg) if show_progress else print(msg)
                 break
@@ -537,13 +518,13 @@ class MLPClassifier(Classifier):
         if best_state is not None:
             model.load_state_dict(best_state)
 
-        self.model = model
-        self.class_names = class_names
-        self.device = device
-        self.history = pd.DataFrame(history)
+        self.model        = model
+        self.class_names  = class_names
+        self.device       = device
+        self.history      = pd.DataFrame(history)
         self.best_val_loss = float(best_val_loss)
-        self.val_fold = val_fold
-        self.input_dim = input_dim
+        self.val_fold     = val_fold
+        self.input_dim    = input_dim
 
         print("Best validation loss: %.5f" % best_val_loss)
         return model
@@ -578,27 +559,21 @@ class MLPClassifier(Classifier):
         if self.standardize:
             X = self._apply_standardizer(X)
 
-        X_t = torch.tensor(X, dtype=torch.float32)
-        pred_ds = TensorDataset(X_t)
-        pred_loader = DataLoader(
-            pred_ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-        )
+        X_t      = torch.tensor(X, dtype=torch.float32)
+        pred_ds  = TensorDataset(X_t)
+        pred_loader = DataLoader(pred_ds, batch_size=self.batch_size, shuffle=False)
 
         iterator = pred_loader
         if show_progress:
             iterator = tqdm(iterator, desc="Predict", dynamic_ncols=True)
 
         probs_chunks = []
-
         self.model.eval()
         with torch.no_grad():
             for (xb,) in iterator:
                 xb = xb.to(self.device)
                 logits = self.model(xb)
-                probs = F.softmax(logits, dim=1).cpu().numpy()
-                probs_chunks.append(probs)
+                probs_chunks.append(F.softmax(logits, dim=1).cpu().numpy())
 
         probs = np.concatenate(probs_chunks, axis=0)
 

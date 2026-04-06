@@ -144,3 +144,71 @@ def score_flat(
     )
 
     return score, len(true_classes)
+
+def score_redshift(
+    metadata_source: MetadataSource,
+    pred_df: pd.DataFrame,
+    class_weights: dict | None = None,
+    known_classes_only: bool = True,
+    normalize: bool = True,
+    redshift_key: str = "redshift",
+) -> Tuple[float, int]:
+    """Compute avocado redshift-weighted logloss."""
+    if class_weights is None:
+        class_weights = avocado.plasticc.plasticc_flat_weights
+
+    metadata = load_metadata(metadata_source)
+
+    # Build a temporary dataset-like object for evaluate_weights_redshift
+    class _MetadataDataset:
+        def __init__(self, metadata):
+            self.metadata = metadata
+
+    true_classes, pred_aligned = align_truth_and_predictions(
+        metadata_source=metadata,
+        pred_df=pred_df,
+        known_classes_only=known_classes_only,
+        normalize=normalize,
+    )
+
+    dataset = _MetadataDataset(metadata.loc[true_classes.index])
+
+    object_weights = avocado.evaluate_weights_redshift(
+        dataset, redshift_key=redshift_key
+    )
+
+    score = avocado.weighted_multi_logloss(
+        true_classes,
+        pred_aligned,
+        object_weights=object_weights,
+        class_weights=class_weights,
+    )
+
+    return score, len(true_classes)
+
+
+def score_kaggle(
+    metadata_source: MetadataSource,
+    pred_df: pd.DataFrame,
+    class_weights: dict | None = None,
+    known_classes_only: bool = True,
+    normalize: bool = True,
+) -> Tuple[float, int]:
+    """Compute avocado Kaggle-weighted logloss (no object weights, kaggle class weights)."""
+    if class_weights is None:
+        class_weights = avocado.plasticc.plasticc_kaggle_weights
+
+    true_classes, pred_aligned = align_truth_and_predictions(
+        metadata_source=metadata_source,
+        pred_df=pred_df,
+        known_classes_only=known_classes_only,
+        normalize=normalize,
+    )
+
+    score = avocado.weighted_multi_logloss(
+        true_classes,
+        pred_aligned,
+        class_weights=class_weights,
+    )
+
+    return score, len(true_classes)
