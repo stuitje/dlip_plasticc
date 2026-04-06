@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# notebook predictions
+notebooks/notebook_outputs/
+
+# jobs
+jobs/
+
+# logs
+logs/

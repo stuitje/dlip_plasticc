@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Merge all per-chunk .h5 files into a single final .h5 file.
+"""
+
+from pathlib import Path
+import h5py
+import numpy as np
+from tqdm.auto import tqdm
+
+# ── config ───────────────────────────────────────────────────────────────────
+CHUNK_DIR  = '/scratch/s4339150/plasticc/data/chunks_test'
+OUT_PATH   = '/scratch/s4339150/plasticc/data/plasticc_test_gp.h5'
+NUM_CHUNKS = 21
+COMPRESSION = 'gzip'
+DATASET_NAME = 'plasticc_test'
+N_TIMESTEPS  = 200
+
+chunk_dir = Path(CHUNK_DIR)
+out_path  = Path(OUT_PATH)
+tmp_path  = out_path.with_suffix('.tmp.h5')
+
+# ── check all chunks are present ─────────────────────────────────────────────
+missing = []
+for i in range(NUM_CHUNKS):
+    p = chunk_dir / f'chunk_{i:04d}.h5'
+    if not p.exists():
+        missing.append(i)
+
+if missing:
+    print(f'ERROR: {len(missing)} chunks are missing: {missing}')
+    print('Re-submit missing chunks with:')
+    print(f'  sbatch --array={",".join(map(str, missing))} submit_chunks.sh')
+    raise SystemExit(1)
+
+print(f'All {NUM_CHUNKS} chunks present. Merging...')
+
+# ── peek at first chunk to get shapes/dtypes ─────────────────────────────────
+with h5py.File(chunk_dir / 'chunk_0000.h5', 'r') as f0:
+    T = f0['cont_features'].shape[1]
+    C = f0['cont_features'].shape[2]
+
+# ── merge into tmp file, then rename atomically ───────────────────────────────
+total_written = 0
+
+with h5py.File(tmp_path, 'w') as fout:
+    # create resizable datasets
+    fout.create_dataset('object_id',     shape=(0,),          maxshape=(None,),       compression=COMPRESSION, dtype=h5py.special_dtype(vlen=str))
+    fout.create_dataset('cont_features', shape=(0, T, C),     maxshape=(None, T, C),  compression=COMPRESSION, dtype=np.float32)
+    fout.create_dataset('band_ids',      shape=(0, T),        maxshape=(None, T),     compression=COMPRESSION, dtype=np.int64)
+    fout.create_dataset('mask',          shape=(0, T),        maxshape=(None, T),     compression=COMPRESSION, dtype=np.float32)
+
+    fout.attrs['dataset_name'] = DATASET_NAME
+    fout.attrs['num_chunks']   = NUM_CHUNKS
+    fout.attrs['n_timesteps']  = N_TIMESTEPS
+    fout.attrs['cont_dim']     = C
+    fout.attrs['description']  = (
+        'Transformer-ready GP-grid features built from PlasticcGPGridFeaturizer'
+    )
+
+    for i in tqdm(range(NUM_CHUNKS), desc='Merging chunks'):
+        with h5py.File(chunk_dir / f'chunk_{i:04d}.h5', 'r') as fc:
+            obj  = fc['object_id'][:]
+            cf   = fc['cont_features'][:]
+            bids = fc['band_ids'][:]
+            msk  = fc['mask'][:]
+
+        n = cf.shape[0]
+
+        fout['object_id'].resize((total_written + n,))
+        fout['object_id'][total_written:total_written + n] = obj.astype(str)
+
+        fout['cont_features'].resize((total_written + n, T, C))
+        fout['cont_features'][total_written:total_written + n] = cf
+
+        fout['band_ids'].resize((total_written + n, T))
+        fout['band_ids'][total_written:total_written + n] = bids
+
+        fout['mask'].resize((total_written + n, T))
+        fout['mask'][total_written:total_written + n] = msk
+
+        total_written += n
+
+    fout.flush()
+
+# atomic rename
+tmp_path.rename(out_path)
+print(f'\nMerge complete: {out_path}')
+print(f'Total objects written: {total_written}')
+
+# ── sanity check ─────────────────────────────────────────────────────────────
+with h5py.File(out_path, 'r') as f:
+    print('\ndatasets:')
+    for key in f.keys():
+        print(f'  {key}: {f[key].shape}  dtype={f[key].dtype}')
+    print('\nattrs:')
+    for key, val in f.attrs.items():
+        print(f'  {key}: {val}')
