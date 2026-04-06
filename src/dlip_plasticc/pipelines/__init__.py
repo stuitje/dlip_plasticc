@@ -10,6 +10,8 @@ from .score import (
     align_truth_and_predictions,
     normalize_rows,
     score_flat,
+    score_redshift,
+    score_kaggle
 )
 from .blend import (
     align_prediction_frames,
