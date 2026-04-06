@@ -210,8 +210,5 @@ __marimo__/
 # notebook predictions
 notebooks/notebook_outputs/
 
-# jobs
-jobs/
-
 # logs
 logs/
